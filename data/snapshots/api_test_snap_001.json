@@ -1,0 +1,22 @@
+{
+  "metadata": {
+    "snapshot_id": "api_test_snap_001",
+    "created_at": "2026-10-19 16:39:15.772405+00:00",
+    "version": "1.0.0",
+    "checksum_sha256": "150b0c555d2ee0094ae5cb2af923f091f1b148766aa7e6e8e1523848b336654b",
+    "portfolio_equity": 100000.0,
+    "cash": 100000.0,
+    "active_positions_count": 0,
+    "file_path": "D:\\ant\\data\\snapshots\\api_test_snap_001.json"
+  },
+  "payload": {
+    "cash": 100000.0,
+    "equity": 100000.0,
+    "realized_pnl": 0.0,
+    "unrealized_pnl": 0.0,
+    "peak_equity": 100000.0,
+    "positions": [],
+    "trade_count": 0,
+    "timestamp": "2026-10-19 16:39:15.772342+00:00"
+  }
+}

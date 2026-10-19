@@ -1,0 +1,34 @@
+{
+  "model_id": "lgbm_candidate_v20261004_121403",
+  "model_name": "LightGBMPredictor",
+  "version": "v20261004_121403",
+  "model_type": "LightGBMPredictor",
+  "feature_names": [
+    "return_1",
+    "log_return_5",
+    "candle_range_pct",
+    "candle_body_ratio",
+    "rsi_14",
+    "macd_hist",
+    "adx_14",
+    "atr_14",
+    "rvol_20",
+    "volatility_regime"
+  ],
+  "target_name": "target_direction",
+  "parameters": {
+    "n_estimators": 50,
+    "learning_rate": 0.05,
+    "max_depth": 4,
+    "num_leaves": 15,
+    "min_child_samples": 20,
+    "random_state": 42,
+    "objective": "multiclass",
+    "num_class": 3,
+    "verbosity": -1
+  },
+  "metrics": {},
+  "trained_at": "2026-10-04T12:14:03.145045Z",
+  "sha256_hash": "1d39261652aa5f3af44a6886423d1bd2870fb51a6a87c6e5be04b1a1ba3b21e1",
+  "is_production_ready": false
+}

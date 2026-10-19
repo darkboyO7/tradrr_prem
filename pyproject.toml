@@ -1,0 +1,121 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trading-intelligence-system"
+version = "0.1.0"
+description = "Professional Production-Grade Modular Trading Intelligence Platform"
+readme = "README.md"
+requires-python = ">=3.12"
+license = {text = "Proprietary"}
+authors = [
+    {name = "Antigravity Quant Architecture Team", email = "quant@antigravity.internal"}
+]
+keywords = [
+    "trading",
+    "quantitative-finance",
+    "market-intelligence",
+    "algorithmic-trading",
+    "machine-learning"
+]
+dependencies = [
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "websockets>=12.0",
+    "httpx>=0.27.0",
+    "sqlalchemy>=2.0.29",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "redis>=5.0.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "pyarrow>=15.0.0",
+    "python-dotenv>=1.0.0",
+    "prometheus-client>=0.20.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.1.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "pre-commit>=3.7.0"
+]
+ml = [
+    "scikit-learn>=1.4.0",
+    "lightgbm>=4.3.0",
+    "xgboost>=2.0.0",
+    "mlflow>=2.11.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "core*",
+    "data*",
+    "features*",
+    "analysis*",
+    "models*",
+    "signals*",
+    "risk*",
+    "backtesting*",
+    "paper_trading*",
+    "execution*",
+    "learning*",
+    "monitoring*",
+    "api*"
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra -q --strict-markers"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning"
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist"
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "C4",  # flake8-comprehensions
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501", # line length handled by black/formatter
+    "B008", # do not perform function calls in argument defaults (fastapi Depends)
+]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+ignore_missing_imports = true
+exclude = [
+    "^.venv/",
+    "^build/",
+    "^dist/"
+]
