@@ -89,6 +89,5 @@ Desktop.ini
 .DS_Store
 
 # Large build artifacts / compiled binaries
-*.exe
 build/
 dist/
