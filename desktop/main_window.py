@@ -277,7 +277,7 @@ class ScannerWorker(QThread):
 class TradingIntelligenceDesktopWindow(QMainWindow):
     """Main Windows Desktop Application Window for the Trading Intelligence Platform."""
 
-    def __init__(self, controller: DesktopServiceController, auto_start_workers: bool = True) -> None:
+    def __init__(self, controller: DesktopServiceController, auto_start_workers: bool = False) -> None:
         super().__init__()
         self.controller = controller
         self._auto_start_workers = auto_start_workers

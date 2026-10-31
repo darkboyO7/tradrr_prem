@@ -237,15 +237,32 @@ class EventNormalizer:
                     latency_ms=round(latency_ms, 2),
                 )
             elif channel in ("quote", "depth") or "bid" in payload:
+                bid_raw = payload.get("bid")
+                ask_raw = payload.get("ask")
+                bid_price = float(bid_raw) if (bid_raw is not None and float(bid_raw) > 0) else None
+                ask_price = float(ask_raw) if (ask_raw is not None and float(ask_raw) > 0) else None
+
+                # Inverted book (bid > ask) or negative check
+                if bid_price is not None and ask_price is not None and bid_price > ask_price:
+                    logger.warning("Inverted book detected in quote: bid > ask", bid=bid_price, ask=ask_price)
+                    bid_price = None
+                    ask_price = None
+
+                bid_size_raw = payload.get("bid_qty", payload.get("bid_size"))
+                ask_size_raw = payload.get("ask_qty", payload.get("ask_size"))
+                bid_size = float(bid_size_raw) if (bid_size_raw is not None and float(bid_size_raw) >= 0) else None
+                ask_size = float(ask_size_raw) if (ask_size_raw is not None and float(ask_size_raw) >= 0) else None
+
                 return NormalizedQuoteEvent(
                     provider=raw_event.provider,
                     symbol=symbol,
                     timestamp=exch_dt,
                     received_at=raw_event.received_at,
-                    bid_price=float(payload.get("bid", payload.get("price", 0.0) - 0.05)),
-                    bid_size=float(payload.get("bid_qty", 100.0)),
-                    ask_price=float(payload.get("ask", payload.get("price", 0.0) + 0.05)),
-                    ask_size=float(payload.get("ask_qty", 100.0)),
+                    exchange_timestamp=exch_dt,
+                    bid_price=bid_price,
+                    bid_size=bid_size,
+                    ask_price=ask_price,
+                    ask_size=ask_size,
                     latency_ms=round(latency_ms, 2),
                 )
         except Exception as exc:

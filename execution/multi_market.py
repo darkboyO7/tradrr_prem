@@ -8,6 +8,7 @@ Provides clean execution adapters for:
 """
 
 import asyncio
+import math
 import time
 from typing import Any
 
@@ -29,10 +30,12 @@ class MultiMarketPaperExecutionClient(BaseExecutionClient):
         market: MarketType,
         paper_engine: PaperTradingEngine | None = None,
         simulated_latency_ms: float = 15.0,
+        enforce_market_hours: bool = False,
     ) -> None:
         self.market = market
         self.engine = paper_engine or PaperTradingEngine()
         self.simulated_latency_ms = simulated_latency_ms
+        self.enforce_market_hours = enforce_market_hours
         self.is_connected = False
         self._market_prices: dict[str, float] = {}
 
@@ -83,24 +86,154 @@ class MultiMarketPaperExecutionClient(BaseExecutionClient):
     ) -> dict[str, Any]:
         await asyncio.sleep(self.simulated_latency_ms / 1000.0)
 
-        inst = SymbolResolver.resolve(symbol)
-        clean_sym = inst.canonical_symbol if inst else symbol
+        order_id = client_order_id or f"{self.market.value.lower()}_ord_{int(time.time()*1000)}"
 
-        # Validate market session
+        # 1. Connected state check
+        if not self.is_connected:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "market": self.market.value,
+                "status": "REJECTED",
+                "reason": "CLIENT_NOT_CONNECTED: Execution client must be connected before placing orders",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        # 2. Market session check
         session = SymbolResolver.get_session(self.market)
         is_open = session.is_open() if session else True
+        if self.enforce_market_hours and not is_open:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "market": self.market.value,
+                "market_open": False,
+                "status": "REJECTED",
+                "reason": f"MARKET_CLOSED: {self.market.value} session is currently closed",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
 
-        # Round according to instrument specifications
-        final_qty = inst.round_quantity(quantity) if inst else quantity
-        final_price = inst.round_price(price) if (inst and price is not None) else price
+        # 3. Instrument resolution and market validation
+        inst = SymbolResolver.resolve(symbol)
+        if not inst:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "market": self.market.value,
+                "status": "REJECTED",
+                "reason": f"UNSUPPORTED_OR_UNKNOWN_INSTRUMENT: '{symbol}' not recognized by symbol resolver",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+        clean_sym = inst.canonical_symbol
 
-        order_id = client_order_id or f"{self.market.value.lower()}_ord_{int(time.time()*1000)}"
-        order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
-        order_t = (
-            OrderType.MARKET
-            if order_type.upper() == "MARKET"
-            else (OrderType.LIMIT if order_type.upper() == "LIMIT" else OrderType.STOP)
-        )
+        # 4. Order side validation (strict BUY / SELL, never map unknown to SELL)
+        side_upper = str(side).upper().strip()
+        if side_upper == "BUY":
+            order_side = OrderSide.BUY
+        elif side_upper == "SELL":
+            order_side = OrderSide.SELL
+        else:
+            return {
+                "order_id": order_id,
+                "symbol": clean_sym,
+                "market": self.market.value,
+                "status": "REJECTED",
+                "reason": f"INVALID_ORDER_SIDE: '{side}' is not valid (must be BUY or SELL)",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        # 5. Order type validation (strict MARKET / LIMIT / STOP, never map unknown to STOP)
+        type_upper = str(order_type).upper().strip()
+        if type_upper == "MARKET":
+            order_t = OrderType.MARKET
+        elif type_upper == "LIMIT":
+            order_t = OrderType.LIMIT
+        elif type_upper == "STOP":
+            order_t = OrderType.STOP
+        else:
+            return {
+                "order_id": order_id,
+                "symbol": clean_sym,
+                "market": self.market.value,
+                "status": "REJECTED",
+                "reason": f"INVALID_ORDER_TYPE: '{order_type}' is not valid (must be MARKET, LIMIT, or STOP)",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        # 6. Quantity validation
+        if quantity is None or math.isnan(quantity) or math.isinf(quantity) or quantity <= 0:
+            return {
+                "order_id": order_id,
+                "symbol": clean_sym,
+                "market": self.market.value,
+                "status": "REJECTED",
+                "reason": f"INVALID_QUANTITY: {quantity} (must be a positive finite number)",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+        final_qty = inst.round_quantity(quantity)
+        if final_qty <= 0:
+            return {
+                "order_id": order_id,
+                "symbol": clean_sym,
+                "market": self.market.value,
+                "status": "REJECTED",
+                "reason": f"INVALID_QUANTITY_AFTER_ROUNDING: {final_qty} (below min lot)",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        # 7. Price validation (strictly reject missing, zero, negative, NaN, inf)
+        if order_t in (OrderType.LIMIT, OrderType.STOP):
+            if price is None or math.isnan(price) or math.isinf(price) or price <= 0:
+                return {
+                    "order_id": order_id,
+                    "symbol": clean_sym,
+                    "market": self.market.value,
+                    "status": "REJECTED",
+                    "reason": f"INVALID_PRICE: {price} for {order_t.value} order (must be positive finite number)",
+                    "execution_mode": "SIMULATED_PAPER",
+                    "is_live": False,
+                }
+            final_price = inst.round_price(price)
+        else:
+            final_price = inst.round_price(price) if (price is not None and not (math.isnan(price) or math.isinf(price) or price <= 0)) else None
+
+        # Market price check for fill: require valid verified market price (NO 100.0 fallback)
+        market_price = self._market_prices.get(clean_sym) or final_price
+        if market_price is None or math.isnan(market_price) or math.isinf(market_price) or market_price <= 0:
+            return {
+                "order_id": order_id,
+                "symbol": clean_sym,
+                "market": self.market.value,
+                "status": "REJECTED",
+                "reason": f"UNAVAILABLE_MARKET_PRICE: No verified live market price for {clean_sym}",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        # 8. Check for stale data state if live market enforcement is on or no manual price override
+        if self.enforce_market_hours or clean_sym not in self._market_prices:
+            try:
+                from data.market_state import MarketStateService
+                st = MarketStateService.get_instance().get_state(clean_sym)
+                if st and (st.is_stale or st.source_state in ("STALE", "UNAVAILABLE")):
+                    return {
+                        "order_id": order_id,
+                        "symbol": clean_sym,
+                        "market": self.market.value,
+                        "status": "REJECTED",
+                        "reason": f"STALE_OR_UNAVAILABLE_DATA: Market data age {st.data_age_seconds:.1f}s is stale/unavailable",
+                        "execution_mode": "SIMULATED_PAPER",
+                        "is_live": False,
+                    }
+            except Exception:
+                pass
 
         paper_order = PaperOrder(
             order_id=order_id,
@@ -113,7 +246,6 @@ class MultiMarketPaperExecutionClient(BaseExecutionClient):
             take_profit=take_profit,
         )
 
-        market_price = self._market_prices.get(clean_sym, final_price or 100.0)
         executed = self.engine.execute_order(paper_order, current_market_price=market_price)
 
         return {
@@ -128,6 +260,8 @@ class MultiMarketPaperExecutionClient(BaseExecutionClient):
             "fee": executed.fee,
             "slippage": executed.slippage,
             "timestamp": executed.filled_at.isoformat() if executed.filled_at else None,
+            "execution_mode": "SIMULATED_PAPER",
+            "is_live": False,
         }
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -151,26 +285,58 @@ class MultiMarketPaperExecutionClient(BaseExecutionClient):
 class NSEExecutionClient(MultiMarketPaperExecutionClient):
     """Execution client for National Stock Exchange of India (NSE)."""
 
-    def __init__(self, paper_engine: PaperTradingEngine | None = None) -> None:
-        super().__init__(market=MarketType.NSE, paper_engine=paper_engine)
+    def __init__(
+        self,
+        paper_engine: PaperTradingEngine | None = None,
+        enforce_market_hours: bool = False,
+    ) -> None:
+        super().__init__(
+            market=MarketType.NSE,
+            paper_engine=paper_engine,
+            enforce_market_hours=enforce_market_hours,
+        )
 
 
 class BSEExecutionClient(MultiMarketPaperExecutionClient):
     """Execution client for Bombay Stock Exchange (BSE)."""
 
-    def __init__(self, paper_engine: PaperTradingEngine | None = None) -> None:
-        super().__init__(market=MarketType.BSE, paper_engine=paper_engine)
+    def __init__(
+        self,
+        paper_engine: PaperTradingEngine | None = None,
+        enforce_market_hours: bool = False,
+    ) -> None:
+        super().__init__(
+            market=MarketType.BSE,
+            paper_engine=paper_engine,
+            enforce_market_hours=enforce_market_hours,
+        )
 
 
 class ForexExecutionClient(MultiMarketPaperExecutionClient):
     """Execution client for Forex (EUR/CHF and FX majors)."""
 
-    def __init__(self, paper_engine: PaperTradingEngine | None = None) -> None:
-        super().__init__(market=MarketType.FOREX, paper_engine=paper_engine)
+    def __init__(
+        self,
+        paper_engine: PaperTradingEngine | None = None,
+        enforce_market_hours: bool = False,
+    ) -> None:
+        super().__init__(
+            market=MarketType.FOREX,
+            paper_engine=paper_engine,
+            enforce_market_hours=enforce_market_hours,
+        )
 
 
 class QuotexExecutionClient(MultiMarketPaperExecutionClient):
     """Paper execution client for Quotex (strictly analysis and paper mode)."""
 
-    def __init__(self, paper_engine: PaperTradingEngine | None = None) -> None:
-        super().__init__(market=MarketType.QUOTEX, paper_engine=paper_engine)
+    def __init__(
+        self,
+        paper_engine: PaperTradingEngine | None = None,
+        enforce_market_hours: bool = False,
+    ) -> None:
+        super().__init__(
+            market=MarketType.QUOTEX,
+            paper_engine=paper_engine,
+            enforce_market_hours=enforce_market_hours,
+        )

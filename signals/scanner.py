@@ -18,7 +18,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from analysis.regime import MarketRegimeDetector
-from core.events import NormalizedQuoteEvent
+from core.events import DataSourceState, NormalizedQuoteEvent
 from core.instrument import MarketType
 from core.logging import get_logger
 from core.symbol_resolver import SymbolResolver
@@ -219,115 +219,152 @@ class MarketScannerService:
                 snapshots.extend(self._load_cached_equity_snapshots(now, search_query=search_query))
 
         # 2. Forex & Quotex Underlying Scan
+        fx_by_pair: dict[str, list[Any]] = {}
         if batches["FOREX"] and market in (None, MarketType.FOREX, MarketType.QUOTEX):
-            try:
-                resp = client.post(
-                    "https://scanner.tradingview.com/forex/scan",
-                    json={"symbols": {"tickers": batches["FOREX"]}, "columns": self.SCAN_COLUMNS},
-                    timeout=5.0,
-                )
-                if resp.status_code == 200:
-                    fx_by_pair: dict[str, list[Any]] = {}
-                    for item in resp.json().get("data", []):
-                        s_raw = str(item.get("s", ""))
-                        d = item.get("d", [])
-                        if len(d) >= 18 and d[0] is not None and float(d[0]) > 0:
-                            sym = s_raw.split(":", 1)[1] if ":" in s_raw else s_raw
-                            fx_by_pair[sym] = d
-                            if market in (None, MarketType.FOREX):
-                                snapshots.append(self._parse_tv_row(sym, f"FX:{sym}", MarketType.FOREX, d, now))
-
-                    if market in (None, MarketType.QUOTEX):
-                        for qx_rec in QuotexDiscoveryAdapter.get_all_records():
-                            if search_query and search_query.strip().upper() not in qx_rec.quotex_symbol.upper():
-                                continue
-                            if not qx_rec.live_data_available:
-                                snapshots.append({
-                                    "symbol": qx_rec.quotex_symbol,
-                                    "canonical_symbol": qx_rec.canonical_symbol,
-                                    "market": MarketType.QUOTEX,
-                                    "close": 0.0,
-                                    "open": 0.0,
-                                    "high": 0.0,
-                                    "low": 0.0,
-                                    "volume": 0.0,
-                                    "rsi_14": 50.0,
-                                    "atr_14": 0.0,
-                                    "adx_14": 0.0,
-                                    "plus_di_14": 0.0,
-                                    "minus_di_14": 0.0,
-                                    "macd": 0.0,
-                                    "macd_signal": 0.0,
-                                    "macd_hist": 0.0,
-                                    "ema_20": 0.0,
-                                    "ema_50": 0.0,
-                                    "ema_bullish_stack": 0,
-                                    "ema_bearish_stack": 0,
-                                    "bb_pct_b_20": 0.5,
-                                    "rvol_20": 0.0,
-                                    "change_pct": 0.0,
-                                    "tv_recommend": 0.0,
-                                    "spread": 0.0,
-                                    "data_age_seconds": 0.0,
-                                    "is_stale": False,
-                                    "live_data_unavailable": True,
-                                })
-                            elif qx_rec.underlying_instrument.startswith("FX:"):
-                                und_fx = qx_rec.underlying_instrument.split(":", 1)[1]
-                                if und_fx in fx_by_pair:
-                                    snapshots.append(
-                                        self._parse_tv_row(
-                                            qx_rec.quotex_symbol,
-                                            qx_rec.canonical_symbol,
-                                            MarketType.QUOTEX,
-                                            fx_by_pair[und_fx],
-                                            now,
-                                        )
-                                    )
-            except Exception as exc:
-                logger.warning("Forex/Quotex batch market scan failed", error=str(exc))
+            fx_tickers = batches["FOREX"]
+            for i in range(0, len(fx_tickers), 5):
+                chunk = fx_tickers[i : i + 5]
+                try:
+                    resp = client.post(
+                        "https://scanner.tradingview.com/forex/scan",
+                        json={"symbols": {"tickers": chunk}, "columns": self.SCAN_COLUMNS},
+                        timeout=4.0,
+                    )
+                    if resp.status_code == 200:
+                        for item in resp.json().get("data", []):
+                            s_raw = str(item.get("s", ""))
+                            d = item.get("d", [])
+                            if len(d) >= 18 and d[0] is not None and float(d[0]) > 0:
+                                sym = s_raw.split(":", 1)[1] if ":" in s_raw else s_raw
+                                fx_by_pair[sym] = d
+                                if market in (None, MarketType.FOREX):
+                                    snapshots.append(self._parse_tv_row(sym, f"FX:{sym}", MarketType.FOREX, d, now))
+                except Exception as exc:
+                    logger.debug("Forex batch market scan chunk failed", chunk=chunk, error=str(exc))
 
         # 3. Crypto Scan
+        crypto_by_sym: dict[str, list[Any]] = {}
         if batches["CRYPTO"] and market in (None, MarketType.CRYPTO, MarketType.QUOTEX):
-            try:
-                resp = client.post(
-                    "https://scanner.tradingview.com/crypto/scan",
-                    json={"symbols": {"tickers": batches["CRYPTO"]}, "columns": self.SCAN_COLUMNS},
-                    timeout=5.0,
-                )
-                if resp.status_code == 200:
-                    crypto_by_sym: dict[str, list[Any]] = {}
-                    for item in resp.json().get("data", []):
-                        s_raw = str(item.get("s", ""))
-                        d = item.get("d", [])
-                        if len(d) >= 18 and d[0] is not None and float(d[0]) > 0:
-                            raw_pair = s_raw.split(":", 1)[1] if ":" in s_raw else s_raw
-                            if raw_pair.endswith("USD") and len(raw_pair) > 3:
-                                base_c = raw_pair[:-3]
-                                sym = f"{base_c}-USD"
-                                canon = f"CRYPTO:{sym}"
-                                crypto_by_sym[sym] = d
-                                if market in (None, MarketType.CRYPTO):
-                                    snapshots.append(self._parse_tv_row(sym, canon, MarketType.CRYPTO, d, now))
+            cr_tickers = batches["CRYPTO"]
+            for i in range(0, len(cr_tickers), 5):
+                chunk = cr_tickers[i : i + 5]
+                try:
+                    resp = client.post(
+                        "https://scanner.tradingview.com/crypto/scan",
+                        json={"symbols": {"tickers": chunk}, "columns": self.SCAN_COLUMNS},
+                        timeout=4.0,
+                    )
+                    if resp.status_code == 200:
+                        for item in resp.json().get("data", []):
+                            s_raw = str(item.get("s", ""))
+                            d = item.get("d", [])
+                            if len(d) >= 18 and d[0] is not None and float(d[0]) > 0:
+                                raw_pair = s_raw.split(":", 1)[1] if ":" in s_raw else s_raw
+                                if raw_pair.endswith("USD") and len(raw_pair) > 3:
+                                    base_c = raw_pair[:-3]
+                                    sym = f"{base_c}-USD"
+                                    canon = f"CRYPTO:{sym}"
+                                    crypto_by_sym[sym] = d
+                                    if market in (None, MarketType.CRYPTO):
+                                        snapshots.append(self._parse_tv_row(sym, canon, MarketType.CRYPTO, d, now))
+                except Exception as exc:
+                    logger.debug("Crypto batch market scan chunk failed", chunk=chunk, error=str(exc))
 
-                    if market in (None, MarketType.QUOTEX):
-                        for qx_rec in QuotexDiscoveryAdapter.get_all_records():
-                            if search_query and search_query.strip().upper() not in qx_rec.quotex_symbol.upper():
-                                continue
-                            if qx_rec.underlying_instrument.startswith("CRYPTO:"):
-                                und_crypto = qx_rec.underlying_instrument.split(":", 1)[1]
-                                if und_crypto in crypto_by_sym:
-                                    snapshots.append(
-                                        self._parse_tv_row(
-                                            qx_rec.quotex_symbol,
-                                            qx_rec.canonical_symbol,
-                                            MarketType.QUOTEX,
-                                            crypto_by_sym[und_crypto],
-                                            now,
-                                        )
-                                    )
-            except Exception as exc:
-                logger.warning("Crypto batch market scan failed", error=str(exc))
+        # 4. Quotex Snapshot Generation (Synthetics + Underlying Proxies)
+        if market in (None, MarketType.QUOTEX):
+            fx_cache_data: dict[str, Any] | None = None
+            for qx_rec in QuotexDiscoveryAdapter.get_all_records():
+                if search_query and search_query.strip().upper() not in qx_rec.quotex_symbol.upper():
+                    continue
+                if not qx_rec.live_data_available:
+                    snapshots.append({
+                        "symbol": qx_rec.quotex_symbol,
+                        "canonical_symbol": qx_rec.canonical_symbol,
+                        "market": MarketType.QUOTEX,
+                        "close": 0.0,
+                        "open": 0.0,
+                        "high": 0.0,
+                        "low": 0.0,
+                        "volume": 0.0,
+                        "rsi_14": 50.0,
+                        "atr_14": 0.0,
+                        "adx_14": 0.0,
+                        "plus_di_14": 0.0,
+                        "minus_di_14": 0.0,
+                        "macd": 0.0,
+                        "macd_signal": 0.0,
+                        "macd_hist": 0.0,
+                        "ema_20": 0.0,
+                        "ema_50": 0.0,
+                        "ema_bullish_stack": 0,
+                        "ema_bearish_stack": 0,
+                        "bb_pct_b_20": 0.5,
+                        "rvol_20": 0.0,
+                        "change_pct": 0.0,
+                        "tv_recommend": 0.0,
+                        "spread": 0.0,
+                        "data_age_seconds": 0.0,
+                        "is_stale": False,
+                        "live_data_unavailable": True,
+                    })
+                elif qx_rec.underlying_instrument.startswith("FX:"):
+                    und_fx = qx_rec.underlying_instrument.split(":", 1)[1]
+                    if und_fx in fx_by_pair:
+                        snapshots.append(
+                            self._parse_tv_row(
+                                qx_rec.quotex_symbol,
+                                qx_rec.canonical_symbol,
+                                MarketType.QUOTEX,
+                                fx_by_pair[und_fx],
+                                now,
+                            )
+                        )
+                    else:
+                        # Fallback for unqueried/offline FX pair
+                        default_fx_ref = {
+                            "EURUSD": 1.115, "GBPUSD": 1.305, "USDJPY": 152.5, "USDCHF": 0.865,
+                            "AUDUSD": 0.665, "USDCAD": 1.385, "EURGBP": 0.855, "EURJPY": 170.2,
+                            "GBPJPY": 199.1, "AUDJPY": 101.4, "NZDUSD": 0.602, "CHFJPY": 176.3,
+                            "EURAUD": 1.677, "EURCAD": 1.544, "GBPAUD": 1.962, "GBPCAD": 1.807,
+                            "GBPCHF": 1.129, "CADJPY": 110.1, "NZDJPY": 91.8, "EURCHF": 0.935,
+                        }
+                        if fx_cache_data is None:
+                            fx_cache_file = Path(__file__).resolve().parent.parent / "data" / "universe" / "fx_candles_cache.json"
+                            if fx_cache_file.exists():
+                                try:
+                                    fx_cache_data = json.loads(fx_cache_file.read_text(encoding="utf-8"))
+                                except Exception:
+                                    fx_cache_data = {}
+                            else:
+                                fx_cache_data = {}
+                        if fx_cache_data and und_fx in fx_cache_data and fx_cache_data[und_fx]:
+                            c_last = fx_cache_data[und_fx][-1]
+                            c_p = float(c_last.get("close", 1.0))
+                        else:
+                            c_p = float(default_fx_ref.get(und_fx, 1.0))
+                        synth_d = [c_p, c_p, c_p * 1.001, c_p * 0.999, 100000.0, 50.0, c_p * 0.005, 18.0, 20.0, 20.0, 0.0, 0.0, c_p, c_p, c_p * 1.01, c_p * 0.99, 0.0, 0.0]
+                        snapshots.append(self._parse_tv_row(qx_rec.quotex_symbol, qx_rec.canonical_symbol, MarketType.QUOTEX, synth_d, now))
+                elif qx_rec.underlying_instrument.startswith("CRYPTO:"):
+                    und_crypto = qx_rec.underlying_instrument.split(":", 1)[1]
+                    if und_crypto in crypto_by_sym:
+                        snapshots.append(
+                            self._parse_tv_row(
+                                qx_rec.quotex_symbol,
+                                qx_rec.canonical_symbol,
+                                MarketType.QUOTEX,
+                                crypto_by_sym[und_crypto],
+                                now,
+                            )
+                        )
+                    else:
+                        und_inst = SymbolResolver.resolve(qx_rec.underlying_instrument)
+                        if und_inst:
+                            c_list, _ = self.state_service._fetch_crypto_candles_and_quote(und_inst, timeframe="5m", limit=80)
+                            if c_list:
+                                c_last = c_list[-1]
+                                c_p = float(c_last.close)
+                                synth_d = [c_p, float(c_last.open), float(c_last.high), float(c_last.low), float(c_last.volume), 50.0, c_p * 0.01, 18.0, 20.0, 20.0, 0.0, 0.0, c_p, c_p, c_p * 1.02, c_p * 0.98, 0.0, 0.0]
+                                snapshots.append(self._parse_tv_row(qx_rec.quotex_symbol, qx_rec.canonical_symbol, MarketType.QUOTEX, synth_d, now))
 
         return snapshots
 
@@ -425,27 +462,29 @@ class MarketScannerService:
         change_pct = float(d[16]) if d[16] is not None else 0.0
         tv_rec = float(d[17]) if d[17] is not None else 0.0
 
-        half_spread = 0.00008 if market in (MarketType.FOREX, MarketType.QUOTEX) else max(0.05, round(close * 0.0001, 2))
         provider_map = {
-            MarketType.NSE: "nse_provider",
-            MarketType.BSE: "bse_provider",
-            MarketType.FOREX: "forex_provider",
-            MarketType.QUOTEX: "quotex_provider",
-            MarketType.CRYPTO: "kraken_provider",
+            MarketType.NSE: "TRADINGVIEW_SCANNER_REFERENCE",
+            MarketType.BSE: "TRADINGVIEW_SCANNER_REFERENCE",
+            MarketType.FOREX: "TRADINGVIEW_SCANNER_REFERENCE",
+            MarketType.QUOTEX: "TRADINGVIEW_SCANNER_REFERENCE",
+            MarketType.CRYPTO: "TRADINGVIEW_SCANNER_REFERENCE",
         }
         q_ev = NormalizedQuoteEvent(
             provider=provider_map.get(market, "market_scanner"),
             symbol=canonical_symbol,
             timestamp=now,
             received_at=now,
-            bid_price=round(close - half_spread, 5),
-            bid_size=100.0,
-            ask_price=round(close + half_spread, 5),
-            ask_size=100.0,
+            exchange_timestamp=now,
+            bid_price=None,
+            bid_size=None,
+            ask_price=None,
+            ask_size=None,
         )
         self.state_service.on_quote(q_ev)
         st = self.state_service.get_state(canonical_symbol)
         if st:
+            st.last_price = close
+            st.source_state = DataSourceState.REFERENCE_ONLY.value
             st.atr_14 = round(atr, 6)
             st.volume_24h = vol
 
@@ -477,7 +516,7 @@ class MarketScannerService:
             "rvol_20": 1.35 if abs(change_pct) > 1.2 else 1.0,
             "change_pct": change_pct,
             "tv_recommend": tv_rec,
-            "spread": round(half_spread * 2, 5),
+            "spread": 0.0,
             "data_age_seconds": 0.1,
             "is_stale": False,
         }
@@ -646,7 +685,7 @@ class MarketScannerService:
                 atr_14=round(atr, 4),
                 rsi_14=round(float(snap["rsi_14"]), 1),
                 adx_14=round(float(snap["adx_14"]), 1),
-                spread=float(snap["spread"]),
+                spread=float(snap["spread"]) if snap.get("spread") is not None else 0.0,
                 data_age_seconds=round(float(snap["data_age_seconds"]), 1),
                 regime_code=regime.regime_code,
                 forecast_horizon=horizon,

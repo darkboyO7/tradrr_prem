@@ -241,21 +241,17 @@ class DesktopServiceController:
             res.prediction_engine_ok = False
             res.prediction_engine_detail = f"Prediction engine failure: {exc}"
 
-        # 9. Start learning/background services
-        _notify(9, "Starting out-of-sample prediction ledger & continuous learning controller...")
+        # 9. Initialize background services in safe read-only STOPPED state
+        _notify(9, "Initializing background services in safe read-only STOPPED state...")
         try:
             from learning.controller import ContinuousLearningController
 
             ledger = PredictionLedgerService.get_instance()
-            ledger.start_background_resolver()
-            self.log_event("Prediction outcome resolver background worker started")
-
             learning_ctrl = ContinuousLearningController.get_instance()
             learning_ctrl.auto_promote = False
-            learning_ctrl.start_background_loop()
-            self.log_event(f"Continuous learning controller active (Champion: {learning_ctrl.active_champion_id})")
+            self.log_event("Safe Read-Only Startup: All background workers remain STOPPED by default")
         except Exception as exc:
-            self.log_event(f"Learning controller start warning: {exc}")
+            self.log_event(f"Service initialization notice: {exc}")
 
         # 10. Open the desktop dashboard
         _notify(10, "Startup complete — launching Desktop Dashboard...")
@@ -1173,4 +1169,50 @@ class DesktopServiceController:
             ContinuousLearningController.get_instance().stop_background_loop()
         except Exception as exc:
             self.log_event(f"Learning controller shutdown warning: {exc}")
+
+    def start_learning_controller(self) -> bool:
+        """Explicitly start background learning controller loop."""
+        from learning.controller import ContinuousLearningController
+        ctrl = ContinuousLearningController.get_instance()
+        ctrl.auto_promote = False
+        ctrl.start_background_loop()
+        self.log_event("Continuous learning controller started explicitly by operator")
+        return True
+
+    def start_outcome_resolver(self) -> bool:
+        """Explicitly start background outcome resolver worker."""
+        from learning.ledger import PredictionLedgerService
+        ledger = PredictionLedgerService.get_instance()
+        ledger.start_background_resolver()
+        self.log_event("Outcome resolver worker started explicitly by operator")
+        return True
+
+    def get_background_worker_statuses(self) -> dict[str, str]:
+        """Query running/stopped status of all background workers."""
+        statuses = {
+            "paper_trading_worker": "STOPPED",
+            "continuous_learning": "STOPPED",
+            "outcome_resolver": "STOPPED",
+        }
+        try:
+            from paper_trading.worker import PaperTradingWorker
+            st = PaperTradingWorker.get_operational_status()
+            statuses["paper_trading_worker"] = st.get("worker_state", "STOPPED")
+        except Exception:
+            pass
+        try:
+            from learning.controller import ContinuousLearningController
+            ctrl = ContinuousLearningController.get_instance()
+            if hasattr(ctrl, "_worker_thread") and ctrl._worker_thread and ctrl._worker_thread.is_alive():
+                statuses["continuous_learning"] = "RUNNING"
+        except Exception:
+            pass
+        try:
+            from learning.ledger import PredictionLedgerService
+            led = PredictionLedgerService.get_instance()
+            if hasattr(led, "_resolver_thread") and led._resolver_thread and led._resolver_thread.is_alive():
+                statuses["outcome_resolver"] = "RUNNING"
+        except Exception:
+            pass
+        return statuses
 

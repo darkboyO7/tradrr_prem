@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from core.events import Candle, ProviderState, RawMarketEvent
+from core.events import Candle, DataSourceState, ProviderState, RawMarketEvent
 from core.instrument import MarketType
 from core.logging import get_logger
 from core.symbol_resolver import SymbolResolver
@@ -198,7 +198,7 @@ class NSEDataProvider(MarketDataProvider):
         self.touch_event()
 
     def fetch_live_quote_sync(self, symbol: str, timeout: float = 6.0) -> RawMarketEvent | None:
-        """Fetch real-time NSE quote from TradingView India Scanner or Groww live feed."""
+        """Fetch NSE quote from TradingView Scanner reference or Groww historical fallback."""
         resolved = SymbolResolver.resolve(symbol)
         clean_sym = resolved.symbol if resolved else symbol.replace("NSE:", "").strip().upper()
         mapped_sym = SymbolResolver._historical_symbol_map.get(clean_sym)
@@ -219,52 +219,58 @@ class NSEDataProvider(MarketDataProvider):
             if resp.status_code == 200:
                 data = resp.json()
                 rows = data.get("data", [])
-                if rows and rows[0].get("d"):
-                    d = rows[0]["d"]
-                    price = float(d[0]) if d[0] is not None else 0.0
-                    if price > 0:
-                        open_p = float(d[1]) if d[1] is not None else price
-                        high_p = float(d[2]) if d[2] is not None else price
-                        low_p = float(d[3]) if d[3] is not None else price
-                        vol = float(d[4]) if d[4] is not None else 0.0
-                        atr_val = float(d[6]) if len(d) > 6 and d[6] is not None else 0.0
-                        tick = resolved.tick_size if resolved else 0.05
-                        half_spread = max(tick, round(price * 0.0001, 2))
-                        now_dt = datetime.now(UTC)
-                        raw_event = RawMarketEvent(
-                            provider=self.name,
-                            symbol=clean_sym,
-                            channel="quote",
-                            received_at=now_dt,
-                            raw_payload={
-                                "type": "quote",
-                                "exchange": "NSE",
-                                "symbol": clean_sym,
-                                "price": price,
-                                "open": open_p,
-                                "high": high_p,
-                                "low": low_p,
-                                "volume": vol,
-                                "atr": atr_val,
-                                "bid": round(price - half_spread, 2),
-                                "ask": round(price + half_spread, 2),
-                                "bid_qty": 250,
-                                "ask_qty": 250,
-                                "timestamp": now_dt.timestamp(),
-                                "source": "TRADINGVIEW_NSE_LIVE",
-                            },
-                        )
-                        self._raw_queue.append(raw_event)
-                        self.touch_event()
-                        return raw_event
+                for row in rows:
+                    row_sym = str(row.get("s", ""))
+                    if not row_sym.startswith("NSE:"):
+                        continue
+                    row_ticker = row_sym.replace("NSE:", "").strip().upper()
+                    if row_ticker != clean_sym and row_ticker != mapped_sym:
+                        continue
+                    if row.get("d"):
+                        d = row["d"]
+                        price = float(d[0]) if d[0] is not None else 0.0
+                        if price > 0:
+                            open_p = float(d[1]) if d[1] is not None else price
+                            high_p = float(d[2]) if d[2] is not None else price
+                            low_p = float(d[3]) if d[3] is not None else price
+                            vol = float(d[4]) if d[4] is not None else 0.0
+                            atr_val = float(d[6]) if len(d) > 6 and d[6] is not None else 0.0
+                            now_dt = datetime.now(UTC)
+                            raw_event = RawMarketEvent(
+                                provider=self.name,
+                                symbol=clean_sym,
+                                channel="quote",
+                                received_at=now_dt,
+                                raw_payload={
+                                    "type": "quote",
+                                    "exchange": "NSE",
+                                    "symbol": clean_sym,
+                                    "price": price,
+                                    "open": open_p,
+                                    "high": high_p,
+                                    "low": low_p,
+                                    "volume": vol,
+                                    "atr": atr_val,
+                                    "bid": None,
+                                    "ask": None,
+                                    "bid_qty": None,
+                                    "ask_qty": None,
+                                    "timestamp": now_dt.timestamp(),
+                                    "exchange_timestamp": now_dt.timestamp(),
+                                    "source": "TRADINGVIEW_SCANNER_REFERENCE",
+                                    "source_state": DataSourceState.REFERENCE_ONLY.value,
+                                },
+                            )
+                            self._raw_queue.append(raw_event)
+                            self.touch_event()
+                            return raw_event
         except Exception as exc:
-            logger.debug("TradingView NSE live quote fallback triggered", symbol=clean_sym, error=str(exc))
+            logger.debug("TradingView NSE quote fallback triggered", symbol=clean_sym, error=str(exc))
 
         candles = self.fetch_historical_candles_sync(clean_sym, timeframe="5m", limit=5, timeout=timeout)
         if candles:
             last_c = candles[-1]
             price = last_c.close
-            tick = resolved.tick_size if resolved else 0.05
             now_dt = datetime.now(UTC)
             raw_event = RawMarketEvent(
                 provider=self.name,
@@ -280,12 +286,14 @@ class NSEDataProvider(MarketDataProvider):
                     "high": last_c.high,
                     "low": last_c.low,
                     "volume": last_c.volume,
-                    "bid": round(price - tick, 2),
-                    "ask": round(price + tick, 2),
-                    "bid_qty": 100,
-                    "ask_qty": 100,
-                    "timestamp": now_dt.timestamp(),
-                    "source": "GROWW_NSE_CASH",
+                    "bid": None,
+                    "ask": None,
+                    "bid_qty": None,
+                    "ask_qty": None,
+                    "timestamp": last_c.timestamp.timestamp(),
+                    "exchange_timestamp": last_c.timestamp.timestamp(),
+                    "source": "GROWW_NSE_HISTORICAL_FALLBACK",
+                    "source_state": DataSourceState.CACHED.value,
                 },
             )
             self._raw_queue.append(raw_event)

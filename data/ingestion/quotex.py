@@ -159,13 +159,27 @@ class QuotexMarketDataAdapter(MarketDataProvider):
 
             und_inst = SymbolResolver.resolve(underlying)
             if und_inst:
-                _, crypto_quote = MarketStateService.get_instance()._fetch_crypto_candles_and_quote(
-                    und_inst, timeframe="5m", limit=5
+                crypto_candles, crypto_quote = MarketStateService.get_instance()._fetch_crypto_candles_and_quote(
+                    und_inst, timeframe="5m", limit=80
                 )
                 if crypto_quote:
                     bid = float(crypto_quote.raw_payload.get("bid", 0.0))
                     ask = float(crypto_quote.raw_payload.get("ask", bid))
                     price = round((bid + ask) / 2.0, 2) if (bid > 0 and ask > 0) else bid
+                    ts_val = float(crypto_quote.raw_payload.get("time", datetime.now(UTC).timestamp()))
+                elif crypto_candles:
+                    latest = crypto_candles[-1]
+                    price = float(latest.close)
+                    bid = round(price * 0.9999, 2)
+                    ask = round(price * 1.0001, 2)
+                    ts_val = latest.timestamp.timestamp()
+                else:
+                    price = 0.0
+                    bid = 0.0
+                    ask = 0.0
+                    ts_val = 0.0
+
+                if price > 0:
                     now_dt = datetime.now(UTC)
                     raw_event = RawMarketEvent(
                         provider=self.name,
@@ -189,7 +203,7 @@ class QuotexMarketDataAdapter(MarketDataProvider):
                             "bid": bid,
                             "ask": ask,
                             "payout": payout,
-                            "timestamp": now_dt.timestamp(),
+                            "timestamp": ts_val or now_dt.timestamp(),
                             "source": "QUOTEX_ANALYSIS_CRYPTO_UNDERLYING",
                         },
                     )

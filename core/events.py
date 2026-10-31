@@ -24,6 +24,7 @@ class ProviderState(str, Enum):
 class DataSourceState(str, Enum):
     """Explicit state classification for market data source provenance."""
     LIVE_VERIFIED = "LIVE_VERIFIED"
+    REFERENCE_ONLY = "REFERENCE_ONLY"
     DELAYED = "DELAYED"
     CACHED = "CACHED"
     STALE = "STALE"
@@ -89,10 +90,11 @@ class NormalizedQuoteEvent(BaseModel):
     symbol: str
     timestamp: datetime
     received_at: datetime
-    bid_price: float = Field(gt=0)
-    bid_size: float = Field(ge=0)
-    ask_price: float = Field(gt=0)
-    ask_size: float = Field(ge=0)
+    exchange_timestamp: datetime | None = None
+    bid_price: float | None = Field(default=None, gt=0)
+    bid_size: float | None = Field(default=None, ge=0)
+    ask_price: float | None = Field(default=None, gt=0)
+    ask_size: float | None = Field(default=None, ge=0)
     sequence: int | None = None
     latency_ms: float = 0.0
 

@@ -4,6 +4,7 @@ Simulates an institutional brokerage account with real-time portfolio valuation,
 active position management, and automatic stop-loss/take-profit order execution.
 """
 
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,6 +44,28 @@ class PaperTradingEngine:
 
     def execute_order(self, order: PaperOrder, current_market_price: float) -> PaperOrder:
         """Process and fill an incoming virtual order."""
+        if (
+            current_market_price is None
+            or math.isnan(current_market_price)
+            or math.isinf(current_market_price)
+            or current_market_price <= 0
+        ):
+            order.status = OrderStatus.REJECTED
+            logger.warning("Paper order rejected: invalid market price", order_id=order.order_id, price=current_market_price)
+            self.orders.append(order)
+            return order
+
+        if (
+            order.quantity is None
+            or math.isnan(order.quantity)
+            or math.isinf(order.quantity)
+            or order.quantity <= 0
+        ):
+            order.status = OrderStatus.REJECTED
+            logger.warning("Paper order rejected: invalid quantity", order_id=order.order_id, qty=order.quantity)
+            self.orders.append(order)
+            return order
+
         self.orders.append(order)
 
         fill_price, fee, slippage = self.simulator.simulate_fill(order, current_market_price)

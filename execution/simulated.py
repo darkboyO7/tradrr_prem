@@ -5,6 +5,7 @@ to implement the full BaseExecutionClient protocol with simulated network latenc
 """
 
 import asyncio
+import math
 import time
 from typing import Any
 
@@ -73,10 +74,80 @@ class SimulatedExecutionClient(BaseExecutionClient):
         await asyncio.sleep(self.simulated_latency_ms / 1000.0)
 
         order_id = client_order_id or f"sim_ord_{int(time.time()*1000)}"
-        order_side = OrderSide.BUY if side.upper() == "BUY" else OrderSide.SELL
-        order_t = OrderType.MARKET if order_type.upper() == "MARKET" else (
-            OrderType.LIMIT if order_type.upper() == "LIMIT" else OrderType.STOP
-        )
+
+        if not self.is_connected:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "status": "REJECTED",
+                "reason": "CLIENT_NOT_CONNECTED",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        side_upper = str(side).upper().strip()
+        if side_upper == "BUY":
+            order_side = OrderSide.BUY
+        elif side_upper == "SELL":
+            order_side = OrderSide.SELL
+        else:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "status": "REJECTED",
+                "reason": f"INVALID_ORDER_SIDE: {side}",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        type_upper = str(order_type).upper().strip()
+        if type_upper == "MARKET":
+            order_t = OrderType.MARKET
+        elif type_upper == "LIMIT":
+            order_t = OrderType.LIMIT
+        elif type_upper == "STOP":
+            order_t = OrderType.STOP
+        else:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "status": "REJECTED",
+                "reason": f"INVALID_ORDER_TYPE: {order_type}",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        if quantity is None or math.isnan(quantity) or math.isinf(quantity) or quantity <= 0:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "status": "REJECTED",
+                "reason": f"INVALID_QUANTITY: {quantity}",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
+
+        if order_t in (OrderType.LIMIT, OrderType.STOP):
+            if price is None or math.isnan(price) or math.isinf(price) or price <= 0:
+                return {
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "status": "REJECTED",
+                    "reason": f"INVALID_PRICE: {price}",
+                    "execution_mode": "SIMULATED_PAPER",
+                    "is_live": False,
+                }
+
+        market_price = self._market_prices.get(symbol) or price
+        if market_price is None or math.isnan(market_price) or math.isinf(market_price) or market_price <= 0:
+            return {
+                "order_id": order_id,
+                "symbol": symbol,
+                "status": "REJECTED",
+                "reason": f"UNAVAILABLE_MARKET_PRICE: No verified price for {symbol}",
+                "execution_mode": "SIMULATED_PAPER",
+                "is_live": False,
+            }
 
         paper_order = PaperOrder(
             order_id=order_id,
@@ -89,7 +160,6 @@ class SimulatedExecutionClient(BaseExecutionClient):
             take_profit=take_profit,
         )
 
-        market_price = self._market_prices.get(symbol, price or 100.0)
         executed = self.engine.execute_order(paper_order, current_market_price=market_price)
 
         return {
@@ -102,6 +172,8 @@ class SimulatedExecutionClient(BaseExecutionClient):
             "fee": executed.fee,
             "slippage": executed.slippage,
             "timestamp": executed.filled_at.isoformat() if executed.filled_at else None,
+            "execution_mode": "SIMULATED_PAPER",
+            "is_live": False,
         }
 
     async def cancel_order(self, order_id: str) -> bool:

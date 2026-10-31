@@ -17,7 +17,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from core.events import Candle, NormalizedQuoteEvent, NormalizedTradeEvent, RawMarketEvent
+from core.events import Candle, DataSourceState, NormalizedQuoteEvent, NormalizedTradeEvent, RawMarketEvent
 from core.instrument import Instrument, MarketType
 from core.logging import get_logger
 from core.symbol_resolver import SymbolResolver
@@ -41,10 +41,11 @@ class InstrumentMarketState(BaseModel):
     connection_state: str = "CONNECTED"
     session_open: bool = True
     last_price: float
-    bid_price: float
-    ask_price: float
-    spread: float
-    spread_pct: float
+    bid_price: float | None = None
+    ask_price: float | None = None
+    spread: float | None = None
+    spread_pct: float | None = None
+    source_state: str = DataSourceState.LIVE_VERIFIED.value
     last_tick_time: datetime
     last_candle_time: datetime | None = None
     data_age_seconds: float
@@ -85,6 +86,10 @@ class MarketStateService:
             cls._instance = MarketStateService()
         return cls._instance
 
+    @classmethod
+    def reset_instance(cls) -> None:
+        cls._instance = None
+
     def _resolve_with_provider(self, symbol: str, provider: str = "") -> tuple[str, Instrument | None]:
         """Resolve symbol taking provider hint into account for cross-listed NSE/BSE symbols."""
         p_low = provider.lower()
@@ -108,13 +113,25 @@ class MarketStateService:
         canon, inst = self._resolve_with_provider(quote.symbol, quote.provider)
 
         now = datetime.now(UTC)
-        mid = (
-            (quote.bid_price + quote.ask_price) / 2.0
-            if (quote.bid_price > 0 and quote.ask_price > 0)
-            else quote.bid_price
-        )
-        spread = max(0.0, quote.ask_price - quote.bid_price)
-        spread_pct = (spread / mid) * 100.0 if mid > 0 else 0.0
+        has_bid = quote.bid_price is not None and quote.bid_price > 0
+        has_ask = quote.ask_price is not None and quote.ask_price > 0
+
+        if has_bid and has_ask and quote.bid_price <= quote.ask_price:
+            mid = (quote.bid_price + quote.ask_price) / 2.0
+            spread = quote.ask_price - quote.bid_price
+            spread_pct = (spread / mid) * 100.0 if mid > 0 else 0.0
+        elif has_bid:
+            mid = quote.bid_price
+            spread = None
+            spread_pct = None
+        elif has_ask:
+            mid = quote.ask_price
+            spread = None
+            spread_pct = None
+        else:
+            mid = None
+            spread = None
+            spread_pct = None
 
         if canon not in self._states:
             market = inst.market if inst else MarketType.CRYPTO
@@ -124,11 +141,11 @@ class MarketStateService:
                 market=market,
                 provider=quote.provider,
                 connection_state="CONNECTED",
-                last_price=mid,
+                last_price=mid if (mid is not None and mid > 0) else 0.0,
                 bid_price=quote.bid_price,
                 ask_price=quote.ask_price,
                 spread=spread,
-                spread_pct=round(spread_pct, 4),
+                spread_pct=round(spread_pct, 4) if spread_pct is not None else None,
                 last_tick_time=quote.timestamp,
                 data_age_seconds=max(0.0, (now - quote.timestamp).total_seconds()),
                 is_stale=max(0.0, (now - quote.timestamp).total_seconds()) > self.stale_threshold_seconds,
@@ -138,9 +155,10 @@ class MarketStateService:
             state.provider = quote.provider or state.provider
             state.bid_price = quote.bid_price
             state.ask_price = quote.ask_price
-            state.last_price = mid
+            if mid is not None and mid > 0:
+                state.last_price = mid
             state.spread = spread
-            state.spread_pct = round(spread_pct, 4)
+            state.spread_pct = round(spread_pct, 4) if spread_pct is not None else None
             state.last_tick_time = quote.timestamp
             state.data_age_seconds = max(0.0, (now - quote.timestamp).total_seconds())
             state.is_stale = state.data_age_seconds > self.stale_threshold_seconds
@@ -621,7 +639,7 @@ class MarketStateService:
         cache_key = (inst.symbol, timeframe)
         if cache_key in MarketStateService._CRYPTO_CANDLE_CACHE:
             cached_ts, cached_bars = MarketStateService._CRYPTO_CANDLE_CACHE[cache_key]
-            if (now_sec - cached_ts) < 120.0 and len(cached_bars) >= 20:
+            if (now_sec - cached_ts) < 300.0 and len(cached_bars) >= min(limit, 20):
                 candles = list(cached_bars)
             else:
                 candles = []
@@ -629,6 +647,7 @@ class MarketStateService:
             candles = []
 
         client = _get_http_client()
+        fetch_limit = max(limit, 80)
 
         # 1. Primary Historical Source: CoinGecko Real OHLC Series (<450ms latency)
         if not candles:
@@ -641,7 +660,7 @@ class MarketStateService:
                     if resp.status_code == 200:
                         rows = resp.json()
                         if isinstance(rows, list):
-                            for row in rows[-limit:]:
+                            for row in rows[-fetch_limit:]:
                                 if len(row) >= 5:
                                     ts = datetime.fromtimestamp(float(row[0]) / 1000.0, tz=UTC)
                                     o_p, h_p, l_p, c_p = float(row[1]), float(row[2]), float(row[3]), float(row[4])
@@ -676,7 +695,7 @@ class MarketStateService:
                     for key, rows in res_dict.items():
                         if key == "last" or not isinstance(rows, list):
                             continue
-                        for row in rows[-limit:]:
+                        for row in rows[-fetch_limit:]:
                             if len(row) >= 7:
                                 ts = datetime.fromtimestamp(float(row[0]), tz=UTC)
                                 o_p, h_p, l_p, c_p, vol = (
@@ -740,6 +759,23 @@ class MarketStateService:
                         )
         except Exception as exc:
             logger.debug("TradingView crypto quote backup failed", symbol=inst.symbol, error=str(exc))
+
+        if raw_quote is None and candles:
+            latest = candles[-1]
+            now_dt = datetime.now(UTC)
+            raw_quote = RawMarketEvent(
+                provider="crypto_spot_backup",
+                symbol=inst.symbol,
+                channel="spread",
+                received_at=now_dt,
+                raw_payload={
+                    "time": now_dt.timestamp(),
+                    "bid": round(latest.close * 0.9999, 2),
+                    "ask": round(latest.close * 1.0001, 2),
+                    "bid_volume": max(1.0, latest.volume),
+                    "ask_volume": max(1.0, latest.volume),
+                },
+            )
 
         return candles, raw_quote
 
@@ -827,10 +863,16 @@ class MarketStateService:
                 self.on_quote(norm_ev)
             elif isinstance(norm_ev, NormalizedTradeEvent):
                 self.on_trade(norm_ev)
-            # If payload also carried volume, update volume_24h if higher
-            raw_vol = float(raw_quote.raw_payload.get("volume", 0.0) or 0.0)
-            if canon in self._states and raw_vol > 0:
-                self._states[canon].volume_24h = raw_vol
+            if canon in self._states:
+                raw_vol = float(raw_quote.raw_payload.get("volume", 0.0) or 0.0)
+                if raw_vol > 0:
+                    self._states[canon].volume_24h = raw_vol
+                raw_price = float(raw_quote.raw_payload.get("price", 0.0) or 0.0)
+                if raw_price > 0 and (self._states[canon].last_price <= 0 or self._states[canon].bid_price is None):
+                    self._states[canon].last_price = raw_price
+                src_state = raw_quote.raw_payload.get("source_state")
+                if src_state:
+                    self._states[canon].source_state = src_state
 
         state = self._states.get(canon)
         if state:

@@ -448,7 +448,11 @@ class SignalFusionEngine:
                 score_sell += microstructure_signal.confidence * 0.20
 
         # 8. Spread Penalty
-        spread_penalty = min(0.10, max(0.0, (spread_pct - 0.05) * 0.2)) if spread_pct > 0.05 else 0.0
+        spread_penalty = (
+            min(0.10, max(0.0, (spread_pct - 0.05) * 0.2))
+            if (spread_pct is not None and spread_pct > 0.05)
+            else 0.0
+        )
         if spread_penalty > 0:
             score_buy = max(0.0, score_buy - spread_penalty)
             score_sell = max(0.0, score_sell - spread_penalty)
@@ -824,12 +828,17 @@ def run_live_intelligence_pipeline(
     volume_valid = bool(np.all(vols_arr >= 0))
     timestamp_current = not state.is_stale or not state.session_open
 
+    state_src = getattr(state, "source_state", None)
     if state.is_stale:
         source_state_val = DataSourceState.STALE.value
     elif not candles or len(candles) == 0:
         source_state_val = DataSourceState.UNAVAILABLE.value
-    elif any(
-        (c.get("source_provider") if isinstance(c, dict) else getattr(c, "source_provider", "")) == "CACHE_NSE"
+    elif state_src == DataSourceState.REFERENCE_ONLY.value or "SCANNER" in (state.provider or "").upper():
+        source_state_val = DataSourceState.REFERENCE_ONLY.value
+    elif state_src == DataSourceState.CACHED.value or any(
+        (c.get("source_provider") if isinstance(c, dict) else getattr(c, "source_provider", "")) in (
+            "CACHE_NSE", "CACHE_BSE", "GROWW_NSE_HISTORICAL_FALLBACK", "GROWW_BSE_HISTORICAL_FALLBACK"
+        )
         for c in candles[-5:]
     ):
         source_state_val = DataSourceState.CACHED.value
@@ -847,7 +856,7 @@ def run_live_intelligence_pipeline(
         "market_session_valid": True,
         "historical_data_sufficient": len(candles) >= 20,
         "features_complete": True,
-        "passed": bool(candles_complete and no_duplicate and no_abnormal_gap and volume_valid),
+        "passed": bool(candles_complete and no_duplicate and no_abnormal_gap and volume_valid and timestamp_current),
     }
 
     if not data_quality_report["passed"]:
