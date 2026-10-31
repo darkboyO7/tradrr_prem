@@ -131,7 +131,7 @@ class MarketRegimeDetector:
         if "adx_14" not in df.columns or "ema_20" not in df.columns:
             feat_df = self.pipeline.compute_all_features(df)
         else:
-            feat_df = df.copy()
+            feat_df = df
 
         c = feat_df["close"]
         e20 = feat_df.get("ema_20", c)
@@ -194,8 +194,7 @@ class MarketRegimeDetector:
         res_df["trend_regime"] = trend_series
         res_df["volatility_regime"] = vol_series
         res_df["volume_regime"] = vol_regime_series
-        res_df["regime_code"] = (
-            res_df["trend_regime"] + "_" + res_df["volatility_regime"] + "_" + res_df["volume_regime"]
-        )
-
+        res_df["regime_code"] = [
+            f"{t}_{v}_{m}" for t, v, m in zip(trend_series, vol_series, vol_regime_series, strict=False)
+        ]
         return res_df

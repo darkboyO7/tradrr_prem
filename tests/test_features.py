@@ -214,3 +214,38 @@ def test_multi_timeframe_feature_merger_no_lookahead():
 
     assert row_13_00["htf_1h_rsi_14"] == 75.0
     assert row_13_05["htf_1h_rsi_14"] == 75.0
+
+
+def test_incremental_feature_calculator_parity():
+    """Verify incremental single-bar calculation matches full batch pipeline."""
+    from features.incremental import IncrementalFeatureCalculator
+
+    df = generate_synthetic_ohlcv(100)
+    pipe = FeaturePipeline()
+    batch_feats = pipe.compute_all_features(df)
+
+    penultimate_row = batch_feats.iloc[-2]
+    active_bar = df.iloc[-1]
+    price = float(active_bar["close"])
+
+    inc_dict = IncrementalFeatureCalculator.update_active_bar(
+        price=price,
+        high=float(active_bar["high"]),
+        low=float(active_bar["low"]),
+        open_price=float(active_bar["open"]),
+        volume=float(active_bar["volume"]),
+        history_df=df,
+        penultimate_row=penultimate_row,
+    )
+
+    actual_row = batch_feats.iloc[-1]
+
+    # Verify key indicator parity within strict tolerance
+    assert abs(inc_dict["return_1"] - float(actual_row["return_1"])) < 1e-6
+    assert abs(inc_dict["ema_9"] - float(actual_row["ema_9"])) < 1e-4
+    assert abs(inc_dict["ema_20"] - float(actual_row["ema_20"])) < 1e-4
+    assert abs(inc_dict["ema_50"] - float(actual_row["ema_50"])) < 1e-4
+    assert abs(inc_dict["atr_14"] - float(actual_row["atr_14"])) < 1e-4
+    assert abs(inc_dict["candle_range_pct"] - float(actual_row["candle_range_pct"])) < 1e-6
+    assert abs(inc_dict["candle_body_ratio"] - float(actual_row["candle_body_ratio"])) < 1e-6
+

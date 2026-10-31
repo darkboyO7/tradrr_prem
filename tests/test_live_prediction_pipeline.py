@@ -153,13 +153,17 @@ async def test_live_prediction_pipeline() -> None:
     assert order_res["filled_quantity"] == risk_decision.approved_quantity
     await nse_exec.disconnect()
 
-    # 10. Prove generalization across arbitrary NSE stock, BSE, FOREX, and QUOTEX
-    for multi_sym in ["NSE:IRCTC", "BSE:RELIANCE", "FX:EURCHF", "QUOTEX:EURCHF_OTC"]:
+    # 10. Prove generalization across in-scope markets: arbitrary NSE stock, BSE, and QUOTEX
+    for multi_sym in ["NSE:IRCTC", "BSE:RELIANCE", "QUOTEX:BTCUSD_QX"]:
         m_res = run_live_intelligence_pipeline(multi_sym, timeframe="5m", horizon="15m")
         assert m_res["status"] == "OK", f"Expected OK for {multi_sym}, got {m_res['status']}"
         assert m_res["market_state"].last_price > 0.0
         m_dec = m_res["decision"]
         assert (m_dec.buy_probability or 0.0) + (m_dec.sell_probability or 0.0) > 0.0
+
+    # Verify that out-of-scope / unconfigured Forex instruments fail closed without fabricating prices
+    fx_res = run_live_intelligence_pipeline("FX:EURCHF", timeframe="5m", horizon="15m")
+    assert fx_res["status"] == "DATA_UNAVAILABLE"
 
 
 def test_no_silent_fallbacks_on_invalid_instrument() -> None:

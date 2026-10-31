@@ -14,7 +14,9 @@ from pydantic import BaseModel, Field
 
 from analysis.patterns import CandlestickPatternDetector, HistoricalPatternSimilarityEngine
 from analysis.regime import MarketRegimeDetector, MarketRegimeState, TrendRegime, VolatilityRegime
+from core.events import DataSourceState
 from core.logging import get_logger
+from features.incremental import IncrementalFeatureCalculator
 from features.pipeline import FeaturePipeline
 from models.base import ModelPrediction, SignalAction
 from models.ml_classifier import LightGBMPredictor
@@ -25,6 +27,10 @@ logger = get_logger(__name__)
 
 # Cache trained online ML predictors keyed by (canonical_symbol, timeframe) -> (bar_ts, predictor)
 _ML_PREDICTOR_CACHE: dict[tuple[str, str], tuple[str, LightGBMPredictor]] = {}
+
+# High-performance pipeline feature & regime state cache keyed by (canonical_symbol, timeframe) -> (bar_sig, base_sig, classified_df, latest_row, regime, pattern_consensus, feature_snapshot, atr)
+_PIPELINE_STATE_CACHE: dict[tuple[str, str], tuple[str, str, pd.DataFrame, Any, MarketRegimeState, dict[str, Any], dict[str, Any], float]] = {}
+_UNIVERSE_STOCK_CACHE: dict[str, Any] = {}
 
 
 class FinalSignalDecision(BaseModel):
@@ -63,11 +69,13 @@ class SignalFusionEngine:
         weight_technical: float = 0.35,
         weight_pattern: float = 0.25,
         min_confidence_threshold: float = 0.55,
+        min_decision_margin: float = 0.06,
     ) -> None:
         self.weight_ml = weight_ml
         self.weight_technical = weight_technical
         self.weight_pattern = weight_pattern
         self.min_confidence_threshold = min_confidence_threshold
+        self.min_decision_margin = min_decision_margin
 
     @staticmethod
     def _build_human_reasons(
@@ -472,22 +480,31 @@ class SignalFusionEngine:
         sl_dist = atr_scale * atr
         tp_dist = (atr_scale * 2.0) * atr
         price_decimals = 5 if current_price < 10.0 else 2
+        score_margin = abs(score_buy - score_sell)
+        is_buy_conviction = score_buy >= threshold and (score_buy - score_sell) >= self.min_decision_margin
+        is_sell_conviction = score_sell >= threshold and (score_sell - score_buy) >= self.min_decision_margin
 
-        if score_buy >= threshold and score_buy > score_sell:
+        if is_buy_conviction:
             action = SignalAction.BUY
             confidence = min(0.95, score_buy)
             stop_loss = round(current_price - sl_dist, price_decimals)
             take_profit = round(current_price + tp_dist, price_decimals)
             rr = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 2.0
-            reasons.insert(0, f"CONVICTION BUY ({horizon}): Composite Score {score_buy:.2f} >= {threshold:.2f}")
+            reasons.insert(
+                0,
+                f"CONVICTION BUY ({horizon}): Composite Score {score_buy:.2f} >= {threshold:.2f} (Margin: {score_margin:.2f} >= {self.min_decision_margin:.2f})"
+            )
 
-        elif score_sell >= threshold and score_sell > score_buy:
+        elif is_sell_conviction:
             action = SignalAction.SELL
             confidence = min(0.95, score_sell)
             stop_loss = round(current_price + sl_dist, price_decimals)
             take_profit = round(current_price - tp_dist, price_decimals)
             rr = round(tp_dist / sl_dist, 2) if sl_dist > 0 else 2.0
-            reasons.insert(0, f"CONVICTION SELL ({horizon}): Composite Score {score_sell:.2f} >= {threshold:.2f}")
+            reasons.insert(
+                0,
+                f"CONVICTION SELL ({horizon}): Composite Score {score_sell:.2f} >= {threshold:.2f} (Margin: {score_margin:.2f} >= {self.min_decision_margin:.2f})"
+            )
 
         else:
             action = SignalAction.NO_TRADE
@@ -505,10 +522,17 @@ class SignalFusionEngine:
                 stop_loss = current_price
                 take_profit = current_price
                 rr = 0.0
-            reasons.insert(
-                0,
-                f"NO-TRADE ({horizon}): Insufficient multi-source conviction (Buy: {score_buy:.2f}, Sell: {score_sell:.2f}, Threshold: {threshold:.2f})"
-            )
+
+            if (score_buy >= threshold or score_sell >= threshold) and score_margin < self.min_decision_margin:
+                reasons.insert(
+                    0,
+                    f"NO-TRADE ({horizon}): Conflicting directional evidence (Buy: {score_buy:.2f}, Sell: {score_sell:.2f}, Margin: {score_margin:.2f} < {self.min_decision_margin:.2f})"
+                )
+            else:
+                reasons.insert(
+                    0,
+                    f"NO-TRADE ({horizon}): Insufficient multi-source conviction (Buy: {score_buy:.2f}, Sell: {score_sell:.2f}, Threshold: {threshold:.2f})"
+                )
 
         human_reasons = self._build_human_reasons(
             action=action,
@@ -595,7 +619,11 @@ def run_live_intelligence_pipeline(
     from signals.forecast import ProbabilisticForecastingEngine
 
     t_start = time.perf_counter()
-    inst = UniverseService.resolve_arbitrary_stock(symbol_or_query)
+    inst = _UNIVERSE_STOCK_CACHE.get(symbol_or_query)
+    if inst is None:
+        inst = UniverseService.resolve_arbitrary_stock(symbol_or_query)
+        if inst is not None:
+            _UNIVERSE_STOCK_CACHE[symbol_or_query] = inst
     if not inst:
         now = datetime.now(UTC)
         empty_regime = MarketRegimeState(regime_code="INSTRUMENT_NOT_FOUND")
@@ -796,7 +824,20 @@ def run_live_intelligence_pipeline(
     volume_valid = bool(np.all(vols_arr >= 0))
     timestamp_current = not state.is_stale or not state.session_open
 
+    if state.is_stale:
+        source_state_val = DataSourceState.STALE.value
+    elif not candles or len(candles) == 0:
+        source_state_val = DataSourceState.UNAVAILABLE.value
+    elif any(
+        (c.get("source_provider") if isinstance(c, dict) else getattr(c, "source_provider", "")) == "CACHE_NSE"
+        for c in candles[-5:]
+    ):
+        source_state_val = DataSourceState.CACHED.value
+    else:
+        source_state_val = DataSourceState.LIVE_VERIFIED.value
+
     data_quality_report = {
+        "source_state": source_state_val,
         "data_available": True,
         "timestamp_current": timestamp_current,
         "candles_complete": candles_complete,
@@ -870,41 +911,222 @@ def run_live_intelligence_pipeline(
         state_svc._synchronize_mtf_and_developing_day(state, candles, base_tf=timeframe)
 
     # Stage 5: Feature Engineering + Candlestick Pattern Scanning
-    feat_pipeline = FeaturePipeline()
-    feat_df = feat_pipeline.compute_all_features(df)
-    feat_df = CandlestickPatternDetector.scan_patterns(feat_df)
+    bar_sig = f"{len(candles)}_{candles[-1].get('timestamp', '')}_{round(price, 4)}"
+    base_sig = f"{len(candles)}_{candles[-1].get('timestamp', '')}"
+    cached_state = _PIPELINE_STATE_CACHE.get((inst.canonical_symbol, timeframe))
+    if cached_state is not None and cached_state[0] == bar_sig:
+        _, _, classified_df, latest_row, regime, pattern_consensus, feature_snapshot, atr = cached_state
+        state.atr_14 = round(atr, 6)
+        t_feat = time.perf_counter()
+    elif cached_state is not None and cached_state[1] == base_sig and len(cached_state[2]) >= 2:
+        # Ultra-low-latency incremental update for dynamic price ticks on the active candle
+        _, _, base_classified_df, _, prev_regime, pattern_consensus, _, prev_atr = cached_state
+        penultimate_row = base_classified_df.iloc[-2]
+        open_price = float(df.loc[df.index[-1], "open"])
+        high_price = float(df.loc[df.index[-1], "high"])
+        low_price = float(df.loc[df.index[-1], "low"])
+        vol_curr = float(df.loc[df.index[-1], "volume"])
 
-    # Stage 6: 3D Market Regime Detection
-    regime_detector = MarketRegimeDetector(feature_pipeline=feat_pipeline)
-    classified_df = regime_detector.classify_dataframe(feat_df)
-    latest_row = classified_df.iloc[-1]
-    regime = regime_detector.classify_bar(latest_row)
+        inc_dict = IncrementalFeatureCalculator.update_active_bar(
+            price=price,
+            high=high_price,
+            low=low_price,
+            open_price=open_price,
+            volume=vol_curr,
+            history_df=df,
+            penultimate_row=penultimate_row,
+        )
+        latest_row = pd.Series(inc_dict)
 
-    # Compute real ATR14 from FeaturePipeline
-    computed_atr = float(latest_row.get("atr_14", 0.0))
-    if np.isnan(computed_atr) or computed_atr <= 0:
-        computed_atr = state.atr_14 if state.atr_14 > 0 else (price * 0.01)
-    atr = computed_atr
-    state.atr_14 = round(atr, 6)
+        feat_pipeline = FeaturePipeline()
+        regime_detector = MarketRegimeDetector(feature_pipeline=feat_pipeline)
+        regime = regime_detector.classify_bar(latest_row)
 
-    t_feat = time.perf_counter()
+        computed_atr = float(inc_dict.get("atr_14", 0.0))
+        if np.isnan(computed_atr) or computed_atr <= 0:
+            computed_atr = state.atr_14 if state.atr_14 > 0 else (price * 0.01)
+        atr = computed_atr
+        state.atr_14 = round(atr, 6)
 
-    # Map volatility_regime to numeric for LightGBM
-    vol_map = {"COMPRESSED": 0.0, "NORMAL": 1.0, "ELEVATED": 2.0, "EXTREME": 3.0}
-    classified_df["volatility_regime"] = classified_df["volatility_regime"].map(lambda v: vol_map.get(str(v), 1.0))
+        t_feat = time.perf_counter()
 
-    # Stage 7: Time-Aligned Historical Pattern Similarity Search (Horizon-aware)
-    sim_horizon_map = {"5m": 1, "15m": 3, "1h": 5, "4h": 10, "1d": 12}
-    sim_h_bars = sim_horizon_map.get(str(horizon).lower(), 5)
-    sim_engine = HistoricalPatternSimilarityEngine()
-    q_win = min(15, max(5, len(classified_df) // 6))
-    matches = sim_engine.find_similar_patterns(
-        classified_df,
-        query_window=q_win,
-        top_k=5,
-        forward_horizons=[1, 3, 5, 10, 12],
-    )
-    pattern_consensus = sim_engine.compute_similarity_consensus(matches, horizon=sim_h_bars)
+        # Update classified_df with updated last row
+        classified_df = base_classified_df.copy()
+        for col, val in inc_dict.items():
+            if col in classified_df.columns:
+                classified_df.at[classified_df.index[-1], col] = val
+        vol_map = {"COMPRESSED": 0.0, "NORMAL": 1.0, "ELEVATED": 2.0, "EXTREME": 3.0}
+        classified_df.at[classified_df.index[-1], "volatility_regime"] = vol_map.get(str(regime.volatility.value), 1.0)
+
+        feature_snapshot = {
+            "close": round(float(latest_row.get("close", price)), 5),
+            "return_1": round(float(latest_row.get("return_1", 0.0)), 6),
+            "log_return_5": round(float(latest_row.get("log_return_5", 0.0)), 6),
+            "rsi_14": round(float(latest_row.get("rsi_14", 50.0)), 2),
+            "adx_14": round(float(latest_row.get("adx_14", 15.0)), 2),
+            "plus_di_14": round(float(latest_row.get("plus_di_14", 20.0)), 2),
+            "minus_di_14": round(float(latest_row.get("minus_di_14", 20.0)), 2),
+            "macd": round(float(latest_row.get("macd", 0.0)), 4),
+            "macd_signal": round(float(latest_row.get("macd_signal", 0.0)), 4),
+            "macd_hist": round(float(latest_row.get("macd_hist", 0.0)), 4),
+            "ema_9": round(float(latest_row.get("ema_9", price)), 4),
+            "ema_20": round(float(latest_row.get("ema_20", price)), 4),
+            "ema_50": round(float(latest_row.get("ema_50", price)), 4),
+            "ema_bullish_stack": int(latest_row.get("ema_bullish_stack", 0)),
+            "ema_bearish_stack": int(latest_row.get("ema_bearish_stack", 0)),
+            "atr_14": round(float(atr), 6),
+            "volatility_ratio": round(float(latest_row.get("volatility_ratio", 1.0)), 4),
+            "bb_pct_b_20": round(float(latest_row.get("bb_pct_b_20", 0.5)), 4),
+            "bb_squeeze": int(latest_row.get("bb_squeeze", 0)),
+            "rvol_20": round(float(latest_row.get("rvol_20", 1.0)), 4),
+            "vwap_dist_pct": round(float(latest_row.get("vwap_dist_pct", 0.0)), 4),
+            "breakout_20": int(latest_row.get("breakout_20", 0)),
+            "breakdown_20": int(latest_row.get("breakdown_20", 0)),
+        }
+
+        _PIPELINE_STATE_CACHE[(inst.canonical_symbol, timeframe)] = (
+            bar_sig, base_sig, classified_df, latest_row, regime, pattern_consensus, feature_snapshot, atr
+        )
+    elif cached_state is not None and len(cached_state[2]) >= 20:
+        # Ultra-low-latency incremental update for candle boundary rollover (candle N-1 finalized, candle N opens)
+        _, _, prev_classified_df, _, prev_regime, pattern_consensus, _, prev_atr = cached_state
+        penultimate_row = prev_classified_df.iloc[-1]
+        open_price = float(df.loc[df.index[-1], "open"])
+        high_price = float(df.loc[df.index[-1], "high"])
+        low_price = float(df.loc[df.index[-1], "low"])
+        vol_curr = float(df.loc[df.index[-1], "volume"])
+
+        inc_dict = IncrementalFeatureCalculator.update_active_bar(
+            price=price,
+            high=high_price,
+            low=low_price,
+            open_price=open_price,
+            volume=vol_curr,
+            history_df=df,
+            penultimate_row=penultimate_row,
+        )
+        latest_row = pd.Series(inc_dict)
+
+        feat_pipeline = FeaturePipeline()
+        regime_detector = MarketRegimeDetector(feature_pipeline=feat_pipeline)
+        regime = regime_detector.classify_bar(latest_row)
+
+        computed_atr = float(inc_dict.get("atr_14", 0.0))
+        if np.isnan(computed_atr) or computed_atr <= 0:
+            computed_atr = state.atr_14 if state.atr_14 > 0 else (price * 0.01)
+        atr = computed_atr
+        state.atr_14 = round(atr, 6)
+
+        t_feat = time.perf_counter()
+
+        vol_map = {"COMPRESSED": 0.0, "NORMAL": 1.0, "ELEVATED": 2.0, "EXTREME": 3.0}
+        latest_row["volatility_regime"] = vol_map.get(str(regime.volatility.value), 1.0)
+
+        # Build new classified row aligned with columns of prev_classified_df
+        new_row_dict = {col: latest_row.get(col, 0.0) for col in prev_classified_df.columns}
+        for col, val in inc_dict.items():
+            new_row_dict[col] = val
+        new_row_dict["volatility_regime"] = vol_map.get(str(regime.volatility.value), 1.0)
+
+        new_row_df = pd.DataFrame([new_row_dict], index=[df.index[-1]])
+        classified_df = pd.concat([prev_classified_df.iloc[-239:], new_row_df])
+
+        feature_snapshot = {
+            "close": round(float(latest_row.get("close", price)), 5),
+            "return_1": round(float(latest_row.get("return_1", 0.0)), 6),
+            "log_return_5": round(float(latest_row.get("log_return_5", 0.0)), 6),
+            "rsi_14": round(float(latest_row.get("rsi_14", 50.0)), 2),
+            "adx_14": round(float(latest_row.get("adx_14", 15.0)), 2),
+            "plus_di_14": round(float(latest_row.get("plus_di_14", 20.0)), 2),
+            "minus_di_14": round(float(latest_row.get("minus_di_14", 20.0)), 2),
+            "macd": round(float(latest_row.get("macd", 0.0)), 4),
+            "macd_signal": round(float(latest_row.get("macd_signal", 0.0)), 4),
+            "macd_hist": round(float(latest_row.get("macd_hist", 0.0)), 4),
+            "ema_9": round(float(latest_row.get("ema_9", price)), 4),
+            "ema_20": round(float(latest_row.get("ema_20", price)), 4),
+            "ema_50": round(float(latest_row.get("ema_50", price)), 4),
+            "ema_bullish_stack": int(latest_row.get("ema_bullish_stack", 0)),
+            "ema_bearish_stack": int(latest_row.get("ema_bearish_stack", 0)),
+            "atr_14": round(float(atr), 6),
+            "volatility_ratio": round(float(latest_row.get("volatility_ratio", 1.0)), 4),
+            "bb_pct_b_20": round(float(latest_row.get("bb_pct_b_20", 0.5)), 4),
+            "bb_squeeze": int(latest_row.get("bb_squeeze", 0)),
+            "rvol_20": round(float(latest_row.get("rvol_20", 1.0)), 4),
+            "vwap_dist_pct": round(float(latest_row.get("vwap_dist_pct", 0.0)), 4),
+            "breakout_20": int(latest_row.get("breakout_20", 0)),
+            "breakdown_20": int(latest_row.get("breakdown_20", 0)),
+        }
+
+        _PIPELINE_STATE_CACHE[(inst.canonical_symbol, timeframe)] = (
+            bar_sig, base_sig, classified_df, latest_row, regime, pattern_consensus, feature_snapshot, atr
+        )
+    else:
+        feat_pipeline = FeaturePipeline()
+        feat_df = feat_pipeline.compute_all_features(df)
+        feat_df = CandlestickPatternDetector.scan_patterns(feat_df)
+
+        # Stage 6: 3D Market Regime Detection
+        regime_detector = MarketRegimeDetector(feature_pipeline=feat_pipeline)
+        classified_df = regime_detector.classify_dataframe(feat_df)
+        latest_row = classified_df.iloc[-1]
+        regime = regime_detector.classify_bar(latest_row)
+
+        # Compute real ATR14 from FeaturePipeline
+        computed_atr = float(latest_row.get("atr_14", 0.0))
+        if np.isnan(computed_atr) or computed_atr <= 0:
+            computed_atr = state.atr_14 if state.atr_14 > 0 else (price * 0.01)
+        atr = computed_atr
+        state.atr_14 = round(atr, 6)
+
+        t_feat = time.perf_counter()
+
+        # Map volatility_regime to numeric for LightGBM
+        vol_map = {"COMPRESSED": 0.0, "NORMAL": 1.0, "ELEVATED": 2.0, "EXTREME": 3.0}
+        classified_df["volatility_regime"] = classified_df["volatility_regime"].map(lambda v: vol_map.get(str(v), 1.0))
+
+        # Stage 7: Time-Aligned Historical Pattern Similarity Search (Horizon-aware)
+        sim_horizon_map = {"5m": 1, "15m": 3, "1h": 5, "4h": 10, "1d": 12}
+        sim_h_bars = sim_horizon_map.get(str(horizon).lower(), 5)
+        sim_engine = HistoricalPatternSimilarityEngine()
+        q_win = min(15, max(5, len(classified_df) // 6))
+        matches = sim_engine.find_similar_patterns(
+            classified_df,
+            query_window=q_win,
+            top_k=5,
+            forward_horizons=[1, 3, 5, 10, 12],
+        )
+        pattern_consensus = sim_engine.compute_similarity_consensus(matches, horizon=sim_h_bars)
+
+        # Extract clean features dict for telemetry and continuous scoring
+        feature_snapshot = {
+            "close": round(float(latest_row.get("close", price)), 5),
+            "return_1": round(float(latest_row.get("return_1", 0.0)), 6),
+            "log_return_5": round(float(latest_row.get("log_return_5", 0.0)), 6),
+            "rsi_14": round(float(latest_row.get("rsi_14", 50.0)), 2),
+            "adx_14": round(float(latest_row.get("adx_14", 15.0)), 2),
+            "plus_di_14": round(float(latest_row.get("plus_di_14", 20.0)), 2),
+            "minus_di_14": round(float(latest_row.get("minus_di_14", 20.0)), 2),
+            "macd": round(float(latest_row.get("macd", 0.0)), 4),
+            "macd_signal": round(float(latest_row.get("macd_signal", 0.0)), 4),
+            "macd_hist": round(float(latest_row.get("macd_hist", 0.0)), 4),
+            "ema_9": round(float(latest_row.get("ema_9", price)), 4),
+            "ema_20": round(float(latest_row.get("ema_20", price)), 4),
+            "ema_50": round(float(latest_row.get("ema_50", price)), 4),
+            "ema_bullish_stack": int(latest_row.get("ema_bullish_stack", 0)),
+            "ema_bearish_stack": int(latest_row.get("ema_bearish_stack", 0)),
+            "atr_14": round(float(atr), 6),
+            "volatility_ratio": round(float(latest_row.get("volatility_ratio", 1.0)), 4),
+            "bb_pct_b_20": round(float(latest_row.get("bb_pct_b_20", 0.5)), 4),
+            "bb_squeeze": int(latest_row.get("bb_squeeze", 0)),
+            "rvol_20": round(float(latest_row.get("rvol_20", 1.0)), 4),
+            "vwap_dist_pct": round(float(latest_row.get("vwap_dist_pct", 0.0)), 4),
+            "breakout_20": int(latest_row.get("breakout_20", 0)),
+            "breakdown_20": int(latest_row.get("breakdown_20", 0)),
+        }
+
+        _PIPELINE_STATE_CACHE[(inst.canonical_symbol, timeframe)] = (
+            bar_sig, base_sig, classified_df, latest_row, regime, pattern_consensus, feature_snapshot, atr
+        )
 
     # Stage 8: Hierarchical Model Strategy & Zero-Lookahead ML Inference (Section 13)
     # Hierarchy: INSTRUMENT_SPECIFIC (>=120 bars) -> REGIME_SPECIFIC (>=60 bars) -> SECTOR_SPECIFIC -> EXCHANGE_SPECIFIC -> GLOBAL_BASELINE
@@ -946,7 +1168,7 @@ def run_live_intelligence_pipeline(
 
         # Priority 2: Use cached online model or fit localized fallback
         if predictor is None:
-            if cached and cached[0] == bar_sig:
+            if cached and (cached[0] == bar_sig or getattr(cached[1], "is_fitted", False)):
                 predictor = cached[1]
             else:
                 try:
@@ -994,32 +1216,33 @@ def run_live_intelligence_pipeline(
     tech_gen = TechnicalSignalGenerator()
     tech_signals = tech_gen.evaluate_bar(latest_row)
 
-    # Extract clean features dict for telemetry and continuous scoring
-    feature_snapshot = {
-        "close": round(float(latest_row.get("close", price)), 5),
-        "return_1": round(float(latest_row.get("return_1", 0.0)), 6),
-        "log_return_5": round(float(latest_row.get("log_return_5", 0.0)), 6),
-        "rsi_14": round(float(latest_row.get("rsi_14", 50.0)), 2),
-        "adx_14": round(float(latest_row.get("adx_14", 15.0)), 2),
-        "plus_di_14": round(float(latest_row.get("plus_di_14", 20.0)), 2),
-        "minus_di_14": round(float(latest_row.get("minus_di_14", 20.0)), 2),
-        "macd": round(float(latest_row.get("macd", 0.0)), 4),
-        "macd_signal": round(float(latest_row.get("macd_signal", 0.0)), 4),
-        "macd_hist": round(float(latest_row.get("macd_hist", 0.0)), 4),
-        "ema_9": round(float(latest_row.get("ema_9", price)), 4),
-        "ema_20": round(float(latest_row.get("ema_20", price)), 4),
-        "ema_50": round(float(latest_row.get("ema_50", price)), 4),
-        "ema_bullish_stack": int(latest_row.get("ema_bullish_stack", 0)),
-        "ema_bearish_stack": int(latest_row.get("ema_bearish_stack", 0)),
-        "atr_14": round(float(atr), 6),
-        "volatility_ratio": round(float(latest_row.get("volatility_ratio", 1.0)), 4),
-        "bb_pct_b_20": round(float(latest_row.get("bb_pct_b_20", 0.5)), 4),
-        "bb_squeeze": int(latest_row.get("bb_squeeze", 0)),
-        "rvol_20": round(float(latest_row.get("rvol_20", 1.0)), 4),
-        "vwap_dist_pct": round(float(latest_row.get("vwap_dist_pct", 0.0)), 4),
-        "breakout_20": int(latest_row.get("breakout_20", 0)),
-        "breakdown_20": int(latest_row.get("breakdown_20", 0)),
-    }
+    # Extract clean features dict for telemetry and continuous scoring if not cached
+    if "feature_snapshot" not in locals() or feature_snapshot is None:
+        feature_snapshot = {
+            "close": round(float(latest_row.get("close", price)), 5),
+            "return_1": round(float(latest_row.get("return_1", 0.0)), 6),
+            "log_return_5": round(float(latest_row.get("log_return_5", 0.0)), 6),
+            "rsi_14": round(float(latest_row.get("rsi_14", 50.0)), 2),
+            "adx_14": round(float(latest_row.get("adx_14", 15.0)), 2),
+            "plus_di_14": round(float(latest_row.get("plus_di_14", 20.0)), 2),
+            "minus_di_14": round(float(latest_row.get("minus_di_14", 20.0)), 2),
+            "macd": round(float(latest_row.get("macd", 0.0)), 4),
+            "macd_signal": round(float(latest_row.get("macd_signal", 0.0)), 4),
+            "macd_hist": round(float(latest_row.get("macd_hist", 0.0)), 4),
+            "ema_9": round(float(latest_row.get("ema_9", price)), 4),
+            "ema_20": round(float(latest_row.get("ema_20", price)), 4),
+            "ema_50": round(float(latest_row.get("ema_50", price)), 4),
+            "ema_bullish_stack": int(latest_row.get("ema_bullish_stack", 0)),
+            "ema_bearish_stack": int(latest_row.get("ema_bearish_stack", 0)),
+            "atr_14": round(float(atr), 6),
+            "volatility_ratio": round(float(latest_row.get("volatility_ratio", 1.0)), 4),
+            "bb_pct_b_20": round(float(latest_row.get("bb_pct_b_20", 0.5)), 4),
+            "bb_squeeze": int(latest_row.get("bb_squeeze", 0)),
+            "rvol_20": round(float(latest_row.get("rvol_20", 1.0)), 4),
+            "vwap_dist_pct": round(float(latest_row.get("vwap_dist_pct", 0.0)), 4),
+            "breakout_20": int(latest_row.get("breakout_20", 0)),
+            "breakdown_20": int(latest_row.get("breakdown_20", 0)),
+        }
 
     # Stage 10: Signal Fusion (combining Live + Developing-Day + MTF + Historical + Regime + ML)
     fusion_engine = SignalFusionEngine()
@@ -1041,11 +1264,11 @@ def run_live_intelligence_pipeline(
     # Stage 11: Multi-Horizon Probabilistic Forecast
     forecast_engine = ProbabilisticForecastingEngine()
     ml_prob_up = ml_pred.raw_scores.get("buy") if (ml_pred and ml_pred.raw_scores) else None
-    fc = forecast_engine.forecast_horizon(
+    all_horizons_report = forecast_engine.forecast_all_horizons(
         symbol=inst.canonical_symbol,
         current_price=price,
         atr=atr,
-        horizon=horizon,
+        primary_horizon=horizon,
         regime=regime,
         technical_signals=tech_signals,
         candle_history=candles,
@@ -1054,11 +1277,11 @@ def run_live_intelligence_pipeline(
         latest_features=feature_snapshot,
         data_is_stale=state.is_stale,
     )
-    all_horizons_report = forecast_engine.forecast_all_horizons(
+    fc = all_horizons_report.forecasts.get(horizon) or forecast_engine.forecast_horizon(
         symbol=inst.canonical_symbol,
         current_price=price,
         atr=atr,
-        primary_horizon=horizon,
+        horizon=horizon,
         regime=regime,
         technical_signals=tech_signals,
         candle_history=candles,

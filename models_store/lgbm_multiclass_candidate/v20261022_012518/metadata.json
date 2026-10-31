@@ -1,0 +1,54 @@
+{
+  "model_id": "lgbm_multiclass_candidate",
+  "version": "v20261022_012518",
+  "created_at": "2026-10-22T01:25:18.464149+00:00",
+  "is_production_ready": false,
+  "multiclass_classes": [
+    0,
+    1,
+    2
+  ],
+  "class_names": [
+    "SELL",
+    "NEUTRAL",
+    "BUY"
+  ],
+  "is_fully_supported": true,
+  "alpha_dirichlet_smoothing": 0.15,
+  "feature_names": [
+    "return_1",
+    "log_return_5",
+    "candle_range_pct",
+    "candle_body_ratio",
+    "rsi_14",
+    "macd_hist",
+    "adx_14",
+    "atr_14",
+    "rvol_20",
+    "volatility_regime"
+  ],
+  "model_sha256": "868f34b26f396399fc903113ab2aed912a340e1fa4ad9834009c1b4fe535508f",
+  "train_samples": 1493,
+  "oos_samples": 637,
+  "oos_metrics": {
+    "accuracy_pct": 41.44,
+    "wilson_ci_lower_pct": 37.68,
+    "wilson_ci_upper_pct": 45.31,
+    "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+    "multiclass_brier_score": 0.6423,
+    "expected_calibration_error": 0.0457,
+    "active_win_rate_pct": 56.93,
+    "active_expectancy_pct": -0.0041
+  },
+  "walk_forward_metrics": {
+    "n_folds": 4,
+    "mean_fold_accuracy_pct": 38.442499999999995,
+    "std_fold_accuracy_pct": 6.009880926441054,
+    "mean_fold_win_rate_pct": 51.72,
+    "mean_fold_expectancy_pct": 0.0539,
+    "aggregate_oos_accuracy_pct": 38.44,
+    "aggregate_wilson_ci_lower_pct": 35.56,
+    "aggregate_wilson_ci_upper_pct": 41.4
+  },
+  "governance_note": "Model evaluated under Section 8 Institutional Accuracy & Evaluation Standard. Acceptance State: ACCURACY_TARGET_NOT_MET."
+}

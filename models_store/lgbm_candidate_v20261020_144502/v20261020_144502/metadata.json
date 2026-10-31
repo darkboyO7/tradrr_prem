@@ -1,0 +1,48 @@
+{
+  "model_id": "lgbm_candidate_v20261020_144502",
+  "model_name": "LightGBMPredictor",
+  "version": "v20261020_144502",
+  "model_type": "LightGBMPredictor",
+  "feature_names": [
+    "return_1",
+    "log_return_5",
+    "candle_range_pct",
+    "candle_body_ratio",
+    "rsi_14",
+    "macd_hist",
+    "adx_14",
+    "atr_14",
+    "rvol_20",
+    "volatility_regime"
+  ],
+  "target_name": "target_direction",
+  "parameters": {
+    "n_estimators": 50,
+    "learning_rate": 0.05,
+    "max_depth": 4,
+    "num_leaves": 15,
+    "min_child_samples": 20,
+    "random_state": 42,
+    "objective": "multiclass",
+    "num_class": 3,
+    "verbosity": -1,
+    "min_confidence": 0.42,
+    "min_margin": 0.05,
+    "class_contract": {
+      "0": "SELL",
+      "1": "NEUTRAL",
+      "2": "BUY"
+    },
+    "unsupported_classes": [],
+    "is_fully_supported": true,
+    "fitted_classes": [
+      0,
+      1,
+      2
+    ]
+  },
+  "metrics": {},
+  "trained_at": "2026-10-20T14:45:02.829887Z",
+  "sha256_hash": "74b5dfb6cd6e3fca952be163bf63040e5c5942ff3bb4edbd3713a315e5c8eb95",
+  "is_production_ready": false
+}

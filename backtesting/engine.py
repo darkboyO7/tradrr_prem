@@ -210,3 +210,143 @@ class BacktestEngine:
             "trades": completed_trades,
             "metrics": metrics,
         }
+
+    def run_binary_options(
+        self,
+        df: pd.DataFrame,
+        symbol: str = "QUOTEX:BTCUSD_QX",
+        timeframe: str = "5m",
+        expiry_bars: int = 3,
+        payout_pct: float = 0.85,
+        stake_amount: float = 100.0,
+        ml_model: Any | None = None,
+    ) -> dict[str, Any]:
+        """Execute chronological binary options backtest adhering to Quotex payout & settlement rules.
+        
+        Rules:
+        - Signal evaluated at bar t close.
+        - Entry executes at bar t+1 open (zero lookahead).
+        - Settlement occurs at bar t+1+expiry_bars close.
+        - Win payout = +stake * payout_pct.
+        - Loss = -stake.
+        - Tie (price equal to strike) = 0.0 (stake returned).
+        - Break-even win rate is 1 / (1 + payout_pct) = ~54.05% for payout=0.85.
+        """
+        if df.empty or len(df) < (20 + expiry_bars):
+            raise ValueError(f"Insufficient bars for binary backtest (minimum {20 + expiry_bars} required).")
+
+        regime_detector = MarketRegimeDetector()
+        tech_generator = TechnicalSignalGenerator()
+        fusion_engine = SignalFusionEngine()
+
+        classified_df = regime_detector.classify_dataframe(df)
+        cash = self.initial_capital
+        equity_records = []
+        completed_trades: list[dict[str, Any]] = []
+
+        n_rows = len(classified_df)
+        i = 0
+        while i < n_rows - expiry_bars - 1:
+            row = classified_df.iloc[i]
+            current_price = float(row["close"])
+            atr = float(row.get("atr_14", current_price * 0.01))
+
+            regime_state = regime_detector.classify_bar(row)
+            tech_signals = tech_generator.evaluate_bar(row)
+
+            ml_pred = None
+            if ml_model is not None and getattr(ml_model, "is_fitted", False):
+                try:
+                    p_list = ml_model.predict(classified_df.iloc[[i]])
+                    if p_list:
+                        ml_pred = p_list[0]
+                except Exception:
+                    pass
+
+            decision = fusion_engine.fuse(
+                symbol=symbol,
+                current_price=current_price,
+                atr=atr,
+                regime=regime_state,
+                technical_signals=tech_signals,
+                ml_prediction=ml_pred,
+            )
+
+            # Record current equity before possible trade
+            equity_records.append(cash)
+
+            # Check if decision clears hurdle
+            if decision.action in (SignalAction.BUY, SignalAction.SELL):
+                # Entry at t+1 open
+                entry_row = classified_df.iloc[i + 1]
+                entry_price = float(entry_row["open"])
+
+                # Expiry settlement at t + 1 + expiry_bars close
+                exit_idx = i + 1 + expiry_bars
+                exit_row = classified_df.iloc[exit_idx]
+                exit_price = float(exit_row["close"])
+
+                # Evaluate win / loss / tie
+                if decision.action == SignalAction.BUY:
+                    if exit_price > entry_price:
+                        pnl = stake_amount * payout_pct
+                        outcome = "WIN"
+                    elif exit_price < entry_price:
+                        pnl = -stake_amount
+                        outcome = "LOSS"
+                    else:
+                        pnl = 0.0
+                        outcome = "TIE"
+                else:  # SELL / PUT
+                    if exit_price < entry_price:
+                        pnl = stake_amount * payout_pct
+                        outcome = "WIN"
+                    elif exit_price > entry_price:
+                        pnl = -stake_amount
+                        outcome = "LOSS"
+                    else:
+                        pnl = 0.0
+                        outcome = "TIE"
+
+                cash += pnl
+                completed_trades.append({
+                    "symbol": symbol,
+                    "action": decision.action.value,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "stake": stake_amount,
+                    "pnl": round(pnl, 2),
+                    "return_pct": round((pnl / stake_amount) * 100.0, 2),
+                    "outcome": outcome,
+                    "payout_pct": payout_pct,
+                    "entry_bar": i + 1,
+                    "exit_bar": exit_idx,
+                    "duration_bars": expiry_bars,
+                })
+                # Advance past the option's duration
+                for _ in range(expiry_bars):
+                    equity_records.append(cash)
+                i += expiry_bars + 1
+            else:
+                i += 1
+
+        # Pad remaining bars
+        while len(equity_records) < len(classified_df):
+            equity_records.append(cash)
+
+        ts_index = df["timestamp"] if "timestamp" in df.columns else df.index
+        equity_curve = pd.Series(equity_records[:len(ts_index)], index=ts_index[:len(equity_records)], name="equity")
+
+        periods_year = 252 * 24 * 12  # 5-minute periods per year
+        metrics = PerformanceMetricsCalculator.calculate_metrics(
+            equity_curve=equity_curve,
+            trades=completed_trades,
+            periods_per_year=periods_year,
+        )
+
+        return {
+            "equity_curve": equity_curve,
+            "trades": completed_trades,
+            "metrics": metrics,
+            "break_even_win_rate_pct": round(1.0 / (1.0 + payout_pct) * 100.0, 2),
+        }

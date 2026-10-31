@@ -1,0 +1,40 @@
+{
+  "model_id": "lgbm_multiclass_candidate",
+  "version": "v20261020_145200",
+  "created_at": "2026-10-20T14:52:00.878359+00:00",
+  "is_production_ready": false,
+  "multiclass_classes": [
+    0,
+    1,
+    2
+  ],
+  "class_names": [
+    "SELL",
+    "NEUTRAL",
+    "BUY"
+  ],
+  "is_fully_supported": true,
+  "alpha_dirichlet_smoothing": 0.15,
+  "feature_names": [
+    "return_1",
+    "log_return_5",
+    "candle_range_pct",
+    "candle_body_ratio",
+    "rsi_14",
+    "macd_hist",
+    "adx_14",
+    "atr_14",
+    "rvol_20",
+    "volatility_regime"
+  ],
+  "model_sha256": "d76145fe1135e48a80d4bcbc4bb4826416bff47a95e6706c4f5740260b439b55",
+  "train_samples": 497,
+  "oos_samples": 211,
+  "oos_metrics": {
+    "accuracy_pct": 52.13,
+    "multiclass_brier_score": 0.6286,
+    "active_win_rate_pct": 60.19,
+    "active_expectancy_pct": 0.1774
+  },
+  "governance_note": "Model trained on verified 3-class target dataset (SELL=0, NEUTRAL=1, BUY=2). Awaiting 60-day prospective live evaluation before champion promotion."
+}

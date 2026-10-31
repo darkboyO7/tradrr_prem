@@ -195,7 +195,12 @@ def verify_genuine_learning_cycle() -> dict[str, Any]:
 
         # 1. Record predictions BEFORE future outcomes exist
         t0 = datetime(2026, 10, 15, 9, 30, tzinfo=UTC)
-        ledger = PredictionLedgerService(load_persisted=False)
+        pending_file = tmp_path / "pending_predictions.jsonl"
+        ledger = PredictionLedgerService(
+            load_persisted=False,
+            ledger_file=ledger_file,
+            pending_ledger_file=pending_file,
+        )
         horizon_sec = 900  # 15 minutes
 
         predictions = []
@@ -399,7 +404,12 @@ def verify_persistence_and_recovery() -> dict[str, Any]:
         assert ctrl_recovered.state == LearningState.IDLE
 
         # Outcome deduplication test
-        ledger = PredictionLedgerService(load_persisted=False)
+        dedup_pending = tmp_path / "dedup_pending.jsonl"
+        ledger = PredictionLedgerService(
+            load_persisted=False,
+            ledger_file=ledger_file,
+            pending_ledger_file=dedup_pending,
+        )
         fc = make_forecast(
             symbol="NSE:RELIANCE",
             entry=2500.0,

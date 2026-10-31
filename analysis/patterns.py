@@ -49,11 +49,10 @@ class CandlestickPatternDetector:
     @staticmethod
     def scan_patterns(df: pd.DataFrame) -> pd.DataFrame:
         """Scan DataFrame and append boolean flags for recognized patterns."""
-        res = df.copy()
-        c = res["close"]
-        o = res["open"]
-        h = res["high"]
-        l = res["low"]
+        c = df["close"]
+        o = df["open"]
+        h = df["high"]
+        l = df["low"]
 
         prev_c = c.shift(1)
         prev_o = o.shift(1)
@@ -66,39 +65,27 @@ class CandlestickPatternDetector:
         lower_wick = np.minimum(o, c) - l
         upper_wick = h - np.maximum(o, c)
 
-        # 1. Bullish Engulfing
-        # Previous bar red, current bar green, current open <= prev close, current close >= prev open
-        bull_engulfing = (prev_c < prev_o) & (c > o) & (o <= prev_c) & (c >= prev_o) & (body > prev_body)
-        res["pattern_bullish_engulfing"] = np.where(bull_engulfing, 1, 0)
-
-        # 2. Bearish Engulfing
-        # Previous bar green, current bar red, current open >= prev close, current close <= prev open
-        bear_engulfing = (prev_c > prev_o) & (c < o) & (o >= prev_c) & (c <= prev_o) & (body > prev_body)
-        res["pattern_bearish_engulfing"] = np.where(bear_engulfing, 1, 0)
-
-        # 3. Hammer (Pin Bar Bullish): Lower wick >= 2x body, upper wick <= 0.2x range
-        hammer = (lower_wick >= 2.0 * body) & (upper_wick <= 0.25 * full_range) & (body > 0.05 * full_range)
-        res["pattern_hammer"] = np.where(hammer, 1, 0)
-
-        # 4. Shooting Star (Pin Bar Bearish): Upper wick >= 2x body, lower wick <= 0.2x range
-        shooting_star = (upper_wick >= 2.0 * body) & (lower_wick <= 0.25 * full_range) & (body > 0.05 * full_range)
-        res["pattern_shooting_star"] = np.where(shooting_star, 1, 0)
-
-        # 5. Inside Bar: Current bar's high <= prev high and current bar's low >= prev low
-        inside_bar = (h <= prev_h) & (l >= prev_l)
-        res["pattern_inside_bar"] = np.where(inside_bar, 1, 0)
-
-        # 6. False Breakout / Spring: Low went below 10-bar prior support but closed back above it
         prior_low_10 = l.shift(2).rolling(window=10, min_periods=5).min()
-        false_breakdown = (l < prior_low_10) & (c > prior_low_10) & (c > o)
-        res["pattern_false_breakdown"] = np.where(false_breakdown, 1, 0)
-
-        # False Breakout / Upthrust: High went above 10-bar prior resistance but closed back below it
         prior_high_10 = h.shift(2).rolling(window=10, min_periods=5).max()
-        false_breakout = (h > prior_high_10) & (c < prior_high_10) & (c < o)
-        res["pattern_false_breakout"] = np.where(false_breakout, 1, 0)
 
-        return res
+        pat = {
+            "pattern_bullish_engulfing": np.where(
+                (prev_c < prev_o) & (c > o) & (o <= prev_c) & (c >= prev_o) & (body > prev_body), 1, 0
+            ),
+            "pattern_bearish_engulfing": np.where(
+                (prev_c > prev_o) & (c < o) & (o >= prev_c) & (c <= prev_o) & (body > prev_body), 1, 0
+            ),
+            "pattern_hammer": np.where(
+                (lower_wick >= 2.0 * body) & (upper_wick <= 0.25 * full_range) & (body > 0.05 * full_range), 1, 0
+            ),
+            "pattern_shooting_star": np.where(
+                (upper_wick >= 2.0 * body) & (lower_wick <= 0.25 * full_range) & (body > 0.05 * full_range), 1, 0
+            ),
+            "pattern_inside_bar": np.where((h <= prev_h) & (l >= prev_l), 1, 0),
+            "pattern_false_breakdown": np.where((l < prior_low_10) & (c > prior_low_10) & (c > o), 1, 0),
+            "pattern_false_breakout": np.where((h > prior_high_10) & (c < prior_high_10) & (c < o), 1, 0),
+        }
+        return pd.concat([df, pd.DataFrame(pat, index=df.index)], axis=1)
 
 
 class HistoricalPatternSimilarityEngine:

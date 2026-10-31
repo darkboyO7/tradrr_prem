@@ -1,0 +1,86 @@
+{
+  "model_id": "lgbm_multiclass_candidate",
+  "version": "v20261022_012518",
+  "evaluated_at": "2026-10-30T15:55:13.409715+00:00",
+  "target_description": "Forward 3-Bar Equity Return Multiclass [0=SELL, 1=NEUTRAL, 2=BUY]",
+  "forecast_horizon": "15m",
+  "sample_size": 637,
+  "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+  "overall_accuracy": 0.4223,
+  "overall_accuracy_pct": 42.23,
+  "wilson_ci_lower_95": 0.3845,
+  "wilson_ci_upper_95": 0.461,
+  "wilson_ci_lower_pct": 38.45,
+  "wilson_ci_upper_pct": 46.1,
+  "target_accuracy_hurdle": 0.95,
+  "confusion_matrix": [
+    [
+      165,
+      53,
+      40
+    ],
+    [
+      97,
+      61,
+      30
+    ],
+    [
+      119,
+      29,
+      43
+    ]
+  ],
+  "per_class_metrics": {
+    "SELL": {
+      "class_id": 0,
+      "class_name": "SELL",
+      "support": 258,
+      "true_positives": 165,
+      "false_positives": 216,
+      "false_negatives": 93,
+      "precision": 0.4331,
+      "recall": 0.6395,
+      "f1_score": 0.5164
+    },
+    "NEUTRAL": {
+      "class_id": 1,
+      "class_name": "NEUTRAL",
+      "support": 188,
+      "true_positives": 61,
+      "false_positives": 82,
+      "false_negatives": 127,
+      "precision": 0.4266,
+      "recall": 0.3245,
+      "f1_score": 0.3686
+    },
+    "BUY": {
+      "class_id": 2,
+      "class_name": "BUY",
+      "support": 191,
+      "true_positives": 43,
+      "false_positives": 70,
+      "false_negatives": 148,
+      "precision": 0.3805,
+      "recall": 0.2251,
+      "f1_score": 0.2829
+    }
+  },
+  "class_distribution": {
+    "SELL": 258,
+    "NEUTRAL": 188,
+    "BUY": 191
+  },
+  "brier_score": 0.6598,
+  "expected_calibration_error": 0.0292,
+  "coverage_rate_pct": 77.55,
+  "abstention_rate_pct": 22.45,
+  "active_sample_count": 494,
+  "active_trade_accuracy_pct": 42.11,
+  "active_trade_win_rate_pct": 53.04,
+  "active_trade_expectancy_pct": 0.0555,
+  "leakage_checks_passed": true,
+  "leakage_audit_log": [],
+  "rejection_reasons": [
+    "Measured accuracy is 42.23% (Wilson 95% CI Lower Bound: 38.45%), which is below the mandatory 95.0% acceptance gate."
+  ]
+}

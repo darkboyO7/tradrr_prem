@@ -83,6 +83,12 @@ data/raw/*
 mlruns/
 mlartifacts/
 
+# Logs and lock files
+logs/
+*.log
+*.lock
+*.tmp
+
 # OS specific
 Thumbs.db
 Desktop.ini

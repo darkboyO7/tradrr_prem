@@ -133,3 +133,44 @@ def test_signal_fusion_no_trade_on_conflicts():
 
     assert decision.action == SignalAction.NO_TRADE
     assert "NO-TRADE" in decision.reasons[0]
+
+
+def test_signal_fusion_decision_margin_guard():
+    """Verify that conflicting directional scores with narrow margin fail closed to NO_TRADE."""
+    engine = SignalFusionEngine(min_confidence_threshold=0.50, min_decision_margin=0.08)
+
+    regime = MarketRegimeState(
+        trend=TrendRegime.RANGING,
+        volatility=VolatilityRegime.NORMAL,
+        volume=VolumeRegime.NORMAL_VOLUME,
+    )
+
+    # Balanced buy and sell signals: Technical BUY vs ML SELL
+    tech_signals = [
+        TechnicalSignal(
+            setup_name="TREND_MOMENTUM_BULL",
+            action=SignalAction.BUY,
+            strength=0.60,
+            reasons=["Bullish bounce"],
+        )
+    ]
+    ml_prediction = ModelPrediction(
+        action=SignalAction.SELL,
+        probability=0.58,
+        expected_return=-0.012,
+        raw_scores={"buy": 0.35, "sell": 0.38, "no_trade": 0.27},
+    )
+
+    decision = engine.fuse(
+        symbol="NSE:TEST",
+        current_price=2500.0,
+        atr=25.0,
+        regime=regime,
+        technical_signals=tech_signals,
+        ml_prediction=ml_prediction,
+    )
+
+    assert decision.action == SignalAction.NO_TRADE
+    assert "NO-TRADE" in decision.reasons[0]
+    assert "Conflicting directional evidence" in decision.reasons[0] or "Insufficient" in decision.reasons[0]
+

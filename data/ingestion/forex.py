@@ -7,6 +7,7 @@ bid/ask spread monitoring, and continuous 24/5 global sessions.
 import urllib.parse
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, time
+from pathlib import Path as _Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -19,9 +20,150 @@ from data.ingestion.nse import _get_http_client
 
 logger = get_logger(__name__)
 
+DISK_CACHE_PATH = _Path(__file__).resolve().parent.parent / "universe" / "fx_candles_cache.json"
+DISK_CACHE_5M_PATH = _Path(__file__).resolve().parent.parent / "universe" / "fx_candles_5m_cache.json"
+
+
+def validate_forex_candle(candle: Candle, now_dt: datetime | None = None) -> tuple[bool, str]:
+    """Strictly validates single Forex OHLC candle invariants.
+
+    Checks:
+    - Finite positive prices (open, high, low, close > 0).
+    - OHLC consistency: low <= min(open, close) and high >= max(open, close).
+    - Volume >= 0.
+    - Timestamp is timezone-aware UTC.
+    - Candle timestamp is not in the future (> now_dt + 300s).
+    """
+    if candle.open <= 0 or candle.high <= 0 or candle.low <= 0 or candle.close <= 0:
+        return False, f"Non-positive price in candle: O={candle.open}, H={candle.high}, L={candle.low}, C={candle.close}"
+    if candle.low > min(candle.open, candle.close) + 1e-9:
+        return False, f"Low {candle.low} exceeds min(open, close) {min(candle.open, candle.close)}"
+    if candle.high < max(candle.open, candle.close) - 1e-9:
+        return False, f"High {candle.high} less than max(open, close) {max(candle.open, candle.close)}"
+    if candle.volume < 0:
+        return False, f"Negative volume: {candle.volume}"
+    if candle.timestamp.tzinfo is None:
+        return False, "Candle timestamp is naive (must be UTC timezone-aware)"
+    if now_dt is not None:
+        age_s = (now_dt - candle.timestamp).total_seconds()
+        if age_s < -300.0:
+            return False, f"Future candle timestamp detected: {candle.timestamp.isoformat()} (age={age_s:.1f}s)"
+    return True, "VALID"
+
+
+def validate_candle_sequence(candles: list[Candle], expected_timeframe: str | None = None) -> tuple[bool, str]:
+    """Validates sequence properties: ordering, uniqueness, timeframe uniformity, and interval boundaries."""
+    if not candles:
+        return True, "EMPTY"
+    prev_ts: datetime | None = None
+    for idx, c in enumerate(candles):
+        valid, msg = validate_forex_candle(c)
+        if not valid:
+            return False, f"Invalid candle at index {idx}: {msg}"
+        if expected_timeframe and c.timeframe != expected_timeframe:
+            return False, f"Timeframe mismatch at index {idx}: expected {expected_timeframe}, got {c.timeframe}"
+        if prev_ts is not None:
+            if c.timestamp <= prev_ts:
+                return False, f"Non-increasing or duplicate timestamp at index {idx}: {c.timestamp.isoformat()} <= {prev_ts.isoformat()}"
+            delta_s = (c.timestamp - prev_ts).total_seconds()
+            if expected_timeframe == "1d":
+                if delta_s < 20.0 * 3600.0:
+                    return False, (
+                        f"Sequence interval violation at index {idx}: delta between daily candles is {delta_s:.1f}s "
+                        f"({delta_s/3600:.2f}h < 20h limit). Intraday bar detected in daily sequence."
+                    )
+            elif expected_timeframe == "5m":
+                if delta_s < 300.0:
+                    return False, (
+                        f"Sequence interval violation at index {idx}: delta between 5m candles is {delta_s:.1f}s (< 300s limit)."
+                    )
+        prev_ts = c.timestamp
+    return True, "VALID"
+
+
+def aggregate_forex_candles(
+    candles: list[Candle],
+    target_tf: str,
+    symbol: str,
+    require_complete: bool = True,
+) -> list[Candle]:
+    """Aggregates candles across strictly compatible timeframes with mathematical verification.
+
+    Supported conversions:
+    - 5m -> 15m: exactly 3 source bars (15 minutes)
+    - 5m -> 1h: exactly 12 source bars (60 minutes)
+    - 5m -> 4h: exactly 48 source bars (240 minutes)
+    - 5m -> 1d: exactly 288 source bars (1440 minutes / 24-hour global session)
+
+    Rules:
+    - Incompatible conversions (e.g. daily -> intraday, 5m -> 1m) raise ValueError.
+    - If require_complete=True, trailing incomplete chunks (< factor bars) are discarded.
+    - Missing intervals within a chunk (delta != 300s) mark the chunk as incomplete.
+    - OHLC Invariants:
+        * open = chunk[0].open
+        * high = max(c.high for c in chunk)
+        * low = min(c.low for c in chunk)
+        * close = chunk[-1].close
+        * volume = sum(c.volume for c in chunk)
+        * timestamp = chunk[0].timestamp
+        * is_closed = True if complete else False
+    """
+    if not candles:
+        return []
+    base_tf = candles[0].timeframe
+    if any(c.timeframe != base_tf for c in candles):
+        raise ValueError("Cannot aggregate sequence with heterogeneous candle timeframes.")
+    if target_tf == base_tf:
+        return list(candles)
+    if base_tf == "1d":
+        raise ValueError(f"Cannot downsample daily reference observations ({base_tf}) into intraday bars ({target_tf}).")
+    if base_tf != "5m":
+        raise ValueError(f"Unsupported base timeframe for aggregation: {base_tf}")
+
+    agg_factors = {"15m": 3, "1h": 12, "4h": 48, "1d": 288}
+    factor = agg_factors.get(target_tf)
+    if not factor:
+        raise ValueError(f"Cannot aggregate from {base_tf} to unsupported target timeframe {target_tf}.")
+
+    agg_candles: list[Candle] = []
+    for idx in range(0, len(candles), factor):
+        chunk = candles[idx : idx + factor]
+        if not chunk:
+            continue
+        # Incomplete chunk handling
+        if len(chunk) < factor:
+            if require_complete:
+                continue
+            is_closed = False
+        else:
+            # Check for missing intervals within chunk
+            has_gap = any((chunk[k].timestamp - chunk[k-1].timestamp).total_seconds() != 300.0 for k in range(1, len(chunk)))
+            if has_gap and require_complete:
+                continue
+            is_closed = not has_gap and chunk[-1].is_closed
+
+        agg_candles.append(
+            Candle(
+                symbol=symbol,
+                timeframe=target_tf,
+                timestamp=chunk[0].timestamp,
+                open=chunk[0].open,
+                high=max(c.high for c in chunk),
+                low=min(c.low for c in chunk),
+                close=chunk[-1].close,
+                volume=sum(c.volume for c in chunk),
+                source_provider=chunk[0].source_provider or "AGGREGATED",
+                source_interval=base_tf,
+                retrieved_at=chunk[0].retrieved_at,
+                is_closed=is_closed,
+            )
+        )
+    return agg_candles
+
 
 class ForexDataProvider(MarketDataProvider):
     """Institutional Forex Market Data Provider supporting EUR/CHF, EUR/USD, GBP/USD, etc."""
+    _CANDLE_CACHE: dict[tuple[str, str], tuple[float, list[Candle]]] = {}
 
     def __init__(
         self,
@@ -228,339 +370,281 @@ class ForexDataProvider(MarketDataProvider):
 
         return None
 
+    def _fetch_daily_ecb_rates(self, symbol: str, limit: int = 360, timeout: float = 4.0) -> list[Candle]:
+        """Fetches European Central Bank daily reference rates from Frankfurter API."""
+        if len(symbol) != 6:
+            return []
+        base_ccy = symbol[:3]
+        quote_ccy = symbol[3:]
+        prec = 3 if quote_ccy == "JPY" else 5
+        fetch_count = max(limit, 360)
+        now_dt = datetime.now(UTC)
+
+        urls = [
+            f"https://api.frankfurter.dev/v1/2024-01-01..2026-12-31?base={base_ccy}&symbols={quote_ccy}",
+            f"https://api.frankfurter.app/2024-01-01..2026-12-31?base={base_ccy}&symbols={quote_ccy}",
+        ]
+        import httpx
+
+        for url in urls:
+            try:
+                with httpx.Client(
+                    follow_redirects=True,
+                    timeout=min(timeout, 3.5),
+                    headers={"User-Agent": "Mozilla/5.0"},
+                ) as client:
+                    resp = client.get(url)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        rates = data.get("rates", {})
+                        sorted_dates = sorted(rates.keys())[-fetch_count:]
+                        candles: list[Candle] = []
+                        prev_c: float | None = None
+                        for dt_str in sorted_dates:
+                            rate_val = rates[dt_str].get(quote_ccy)
+                            if rate_val is None:
+                                continue
+                            c_p = float(rate_val)
+                            o_p = prev_c if prev_c is not None else c_p
+                            h_p = max(o_p, c_p)
+                            l_p = min(o_p, c_p)
+                            ts = datetime.fromisoformat(f"{dt_str}T16:00:00+00:00")
+                            candle = Candle(
+                                symbol=symbol,
+                                timeframe="1d",
+                                timestamp=ts,
+                                open=round(o_p, prec),
+                                high=round(h_p, prec),
+                                low=round(l_p, prec),
+                                close=round(c_p, prec),
+                                volume=0.0,
+                                source_provider="ECB_FRANKFURTER",
+                                source_interval="1d",
+                                retrieved_at=now_dt,
+                                is_closed=True,
+                            )
+                            candles.append(candle)
+                            prev_c = c_p
+                        if candles:
+                            return candles
+            except Exception as exc:
+                logger.debug(f"ECB daily fetch attempt failed for {symbol} via {url}: {exc}")
+        return []
+
+    def _load_disk_candles(self, symbol: str, expected_timeframe: str = "1d") -> list[Candle]:
+        """Loads and strictly validates cached candles from disk preserving interval semantics."""
+        import json as _json
+
+        disk_path = DISK_CACHE_PATH if expected_timeframe == "1d" else DISK_CACHE_5M_PATH
+        if not disk_path.exists():
+            return []
+        try:
+            data = _json.loads(disk_path.read_text(encoding="utf-8"))
+            if symbol not in data:
+                return []
+            raw_list = data[symbol]
+            candles: list[Candle] = []
+            now_dt = datetime.now(UTC)
+            for item in raw_list:
+                ts = datetime.fromisoformat(item["timestamp"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                o = float(item["open"])
+                h = float(item["high"])
+                l = float(item["low"])
+                c = float(item["close"])
+                v = float(item.get("volume", 0.0))
+                # Ensure OHLC consistency on load
+                h = max(h, o, c)
+                l = min(l, o, c)
+                candles.append(
+                    Candle(
+                        symbol=symbol,
+                        timeframe=expected_timeframe,
+                        timestamp=ts,
+                        open=o,
+                        high=h,
+                        low=l,
+                        close=c,
+                        volume=v,
+                        source_provider="DISK_CACHE",
+                        source_interval=expected_timeframe,
+                        retrieved_at=now_dt,
+                        is_closed=True,
+                    )
+                )
+            return candles
+        except Exception as exc:
+            logger.debug(f"Could not load disk candles for {symbol}: {exc}")
+            return []
+
+    def _fetch_intraday_5m_candles(self, symbol: str, limit: int = 240, timeout: float = 4.0) -> list[Candle]:
+        """Queries true intraday 5m market data. Never fabricates replacement data."""
+        cached = self._load_disk_candles(symbol, expected_timeframe="5m")
+        if cached:
+            valid, _ = validate_candle_sequence(cached, expected_timeframe="5m")
+            if valid and len(cached) >= 20:
+                return cached[-limit:]
+        return []
+
     def fetch_historical_candles_sync(
         self,
         symbol: str,
-        timeframe: str = "5m",
+        timeframe: str = "1d",
         limit: int = 240,
         timeout: float = 5.0,
     ) -> list[Candle]:
-        """Fetch real historical Forex OHLCV candles with caching and MTF aggregation."""
-        import json as _json
-        from pathlib import Path as _Path
-        import httpx
+        """Fetch verified Forex OHLCV candles preserving interval semantics and provenance.
 
+        Rules:
+        - timeframe='1d': Fetches true daily reference rates from ECB API or valid daily disk cache.
+          Daily reference rates are strictly labeled timeframe='1d'.
+          Never mixes daily reference rates with intraday tips.
+        - timeframe='5m': Queries true 5-minute market data feed.
+          If no true 5m provider is available, returns empty list (fails closed).
+          Never fabricates intraday bars from daily reference rates.
+        - Multi-timeframe aggregation: Only operates on genuinely compatible intervals (e.g. 5m -> 15m/1h/4h).
+        """
         resolved = SymbolResolver.resolve(symbol)
         clean_sym = (
             resolved.symbol
             if resolved
             else symbol.replace("FX:", "").replace("/", "").replace("-", "").strip().upper()
         )
+        now_dt = datetime.now(UTC)
+        now_sec = now_dt.timestamp()
 
-        now_sec = datetime.now(UTC).timestamp()
         if not hasattr(ForexDataProvider, "_CANDLE_CACHE"):
             ForexDataProvider._CANDLE_CACHE: dict[tuple[str, str], tuple[float, list[Candle]]] = {}
 
-        disk_cache_path = _Path(__file__).resolve().parent.parent / "universe" / "fx_candles_cache.json"
+        # 1. Return from memory cache if recent (< 300s) and sufficient
+        cache_key = (clean_sym, timeframe)
+        if cache_key in ForexDataProvider._CANDLE_CACHE:
+            cached_time, cached_candles = ForexDataProvider._CANDLE_CACHE[cache_key]
+            if (now_sec - cached_time) < 300.0 and len(cached_candles) >= min(limit, 30):
+                return cached_candles[-limit:]
 
-        def _aggregate_from_base(raw_5m: list[Candle], target_tf: str) -> list[Candle]:
-            if target_tf == "5m":
-                return list(raw_5m)
-            agg_factor = {"1m": 1, "15m": 3, "1h": 12, "4h": 24, "1d": 48}.get(target_tf, 3)
-            if agg_factor <= 1:
-                return [
-                    Candle(
-                        symbol=clean_sym,
-                        timeframe=target_tf,
-                        timestamp=c.timestamp,
-                        open=c.open,
-                        high=c.high,
-                        low=c.low,
-                        close=c.close,
-                        volume=c.volume,
-                    )
-                    for c in raw_5m
-                ]
-            agg_candles: list[Candle] = []
-            for idx in range(0, len(raw_5m), agg_factor):
-                chunk = raw_5m[idx : idx + agg_factor]
-                if not chunk:
-                    continue
-                agg_candles.append(
-                    Candle(
-                        symbol=clean_sym,
-                        timeframe=target_tf,
-                        timestamp=chunk[-1].timestamp,
-                        open=chunk[0].open,
-                        high=max(c.high for c in chunk),
-                        low=min(c.low for c in chunk),
-                        close=chunk[-1].close,
-                        volume=sum(c.volume for c in chunk),
-                    )
-                )
-            return agg_candles
-
-        # 1. Return from memory cache if base 5m series is recent (< 300s)
-        base_entry = ForexDataProvider._CANDLE_CACHE.get((clean_sym, "5m"))
-        if base_entry and (now_sec - base_entry[0]) < 300.0 and len(base_entry[1]) >= 240:
-            agg = _aggregate_from_base(base_entry[1], timeframe)
-            if len(agg) >= 20:
-                return agg[-limit:]
-
-        candles: list[Candle] = []
-        fetch_count = max(limit, 360)
-
-        # 2. Primary Historical Source: European Central Bank (Frankfurter API) + Live TradingView Intraday Tip
-        if len(clean_sym) == 6:
-            base_ccy = clean_sym[:3]
-            quote_ccy = clean_sym[3:]
-            ecb_url = f"https://api.frankfurter.dev/v1/2024-01-01..2026-12-31?base={base_ccy}&symbols={quote_ccy}"
-            prec = 3 if quote_ccy == "JPY" else 5
-            import time as _time
-
-            for _attempt in range(2):
-                try:
-                    with httpx.Client(
-                        follow_redirects=True,
-                        timeout=3.5,
-                        headers={"User-Agent": "Mozilla/5.0"},
-                    ) as ecb_client:
-                        resp = ecb_client.get(ecb_url)
-                        if resp.status_code == 200:
-                            data = resp.json()
-                            rates = data.get("rates", {})
-                            sorted_dates = sorted(rates.keys())[-fetch_count:]
-                            prev_close: float | None = None
-                            for dt_str in sorted_dates:
-                                rate_val = rates[dt_str].get(quote_ccy)
-                                if rate_val is None:
-                                    continue
-                                c_p = float(rate_val)
-                                o_p = prev_close if prev_close is not None else c_p
-                                diff = abs(c_p - o_p)
-                                band = max(diff * 0.6, c_p * 0.0012)
-                                h_p = max(o_p, c_p) + band
-                                l_p = min(o_p, c_p) - band
-                                ts = datetime.fromisoformat(f"{dt_str}T16:00:00+00:00")
-                                candles.append(
-                                    Candle(
-                                        symbol=clean_sym,
-                                        timeframe="5m",
-                                        timestamp=ts,
-                                        open=round(o_p, prec),
-                                        high=round(h_p, prec),
-                                        low=round(l_p, prec),
-                                        close=round(c_p, prec),
-                                        volume=100000.0,
-                                    )
-                                )
-                                prev_close = c_p
-                            if candles:
-                                # Append real live multi-interval TradingView FX bars if available
-                                try:
-                                    tv_resp = ecb_client.post(
-                                        "https://scanner.tradingview.com/forex/scan",
-                                        json={
-                                            "symbols": {"tickers": [f"FX_IDC:{clean_sym}", f"FX:{clean_sym}"]},
-                                            "columns": [
-                                                "open|240", "high|240", "low|240", "close|240",
-                                                "open|60", "high|60", "low|60", "close|60",
-                                                "open|15", "high|15", "low|15", "close|15",
-                                                "open|5", "high|5", "low|5", "close|5",
-                                                "open", "high", "low", "close",
-                                            ],
-                                        },
-                                    )
-                                    if tv_resp.status_code == 200:
-                                        tv_rows = tv_resp.json().get("data", [])
-                                        if tv_rows and tv_rows[0].get("d"):
-                                            d = tv_rows[0]["d"]
-                                            now_utc = datetime.now(UTC)
-                                            offsets = [
-                                                (0, 14400),
-                                                (4, 3600),
-                                                (8, 900),
-                                                (12, 300),
-                                                (16, 0),
-                                            ]
-                                            for base_idx, sec_ago in offsets:
-                                                if len(d) >= base_idx + 4 and d[base_idx] is not None and d[base_idx + 3] is not None:
-                                                    o_v = float(d[base_idx])
-                                                    h_v = float(d[base_idx + 1] or o_v)
-                                                    l_v = float(d[base_idx + 2] or o_v)
-                                                    c_v = float(d[base_idx + 3])
-                                                    if o_v > 0 and c_v > 0:
-                                                        bar_ts = datetime.fromtimestamp(now_utc.timestamp() - sec_ago, tz=UTC)
-                                                        candles.append(
-                                                            Candle(
-                                                                symbol=clean_sym,
-                                                                timeframe="5m",
-                                                                timestamp=bar_ts,
-                                                                open=round(o_v, prec),
-                                                                high=round(max(o_v, h_v, c_v), prec),
-                                                                low=round(min(o_v, l_v, c_v), prec),
-                                                                close=round(c_v, prec),
-                                                                volume=120000.0,
-                                                            )
-                                                        )
-                                except Exception:
-                                    pass
-
-                                base_series = candles[-fetch_count:]
-                                ForexDataProvider._CANDLE_CACHE[(clean_sym, "5m")] = (now_sec, list(base_series))
-                                try:
-                                    disk_data: dict[str, Any] = {}
-                                    if disk_cache_path.exists():
-                                        disk_data = _json.loads(disk_cache_path.read_text(encoding="utf-8"))
-                                    disk_data[clean_sym] = [
-                                        {
-                                            "timestamp": b.timestamp.isoformat(),
-                                            "open": b.open,
-                                            "high": b.high,
-                                            "low": b.low,
-                                            "close": b.close,
-                                            "volume": b.volume,
-                                        }
-                                        for b in base_series
-                                    ]
-                                    disk_cache_path.write_text(_json.dumps(disk_data), encoding="utf-8")
-                                except Exception:
-                                    pass
-                                self.touch_event()
-                                agg = _aggregate_from_base(base_series, timeframe)
-                                return agg[-limit:]
-                except Exception as exc:
-                    logger.debug("Forex ECB historical candle attempt failed", symbol=clean_sym, error=str(exc))
-                    _time.sleep(0.1)
-
-        # 3. Check persistent ECB disk cache if live ECB request was rate-limited/reset
-        if disk_cache_path.exists():
-            try:
-                disk_data = _json.loads(disk_cache_path.read_text(encoding="utf-8"))
-                if clean_sym in disk_data and len(disk_data[clean_sym]) >= 240:
-                    restored = [
-                        Candle(
-                            symbol=clean_sym,
-                            timeframe="5m",
-                            timestamp=datetime.fromisoformat(row["timestamp"]),
-                            open=float(row["open"]),
-                            high=float(row["high"]),
-                            low=float(row["low"]),
-                            close=float(row["close"]),
-                            volume=float(row.get("volume", 100000.0)),
-                        )
-                        for row in disk_data[clean_sym]
-                    ]
-                    ForexDataProvider._CANDLE_CACHE[(clean_sym, "5m")] = (now_sec, restored)
+        # 2. Daily Reference Rates Pipeline (timeframe == "1d")
+        if timeframe == "1d":
+            candles = self._fetch_daily_ecb_rates(clean_sym, limit=limit, timeout=timeout)
+            if candles:
+                valid, msg = validate_candle_sequence(candles, expected_timeframe="1d")
+                if valid and len(candles) >= 30:
+                    ForexDataProvider._CANDLE_CACHE[cache_key] = (now_sec, candles)
                     self.touch_event()
-                    agg = _aggregate_from_base(restored, timeframe)
-                    return agg[-limit:]
-            except Exception:
-                pass
+                    return candles[-limit:]
+                else:
+                    logger.warning(f"ECB daily candles validation failed for {clean_sym}: {msg}")
 
-        # 4. TradingView Forex Multi-Horizon Historical Reconstruction (ISP-resilient backup)
-        if len(clean_sym) == 6:
-            prec = 3 if clean_sym.endswith("JPY") else 5
+            # Fallback to persistent disk cache for 1d
+            cached_disk = self._load_disk_candles(clean_sym, expected_timeframe="1d")
+            if cached_disk:
+                valid, msg = validate_candle_sequence(cached_disk, expected_timeframe="1d")
+                if valid and len(cached_disk) >= 30:
+                    ForexDataProvider._CANDLE_CACHE[cache_key] = (now_sec, cached_disk)
+                    self.touch_event()
+                    return cached_disk[-limit:]
+
+            return []
+
+        # 3. Intraday 5m Candles Pipeline (timeframe == "5m")
+        elif timeframe == "5m":
+            candles = self._fetch_intraday_5m_candles(clean_sym, limit=limit, timeout=timeout)
+            if candles:
+                valid, msg = validate_candle_sequence(candles, expected_timeframe="5m")
+                if valid and len(candles) >= 20:
+                    ForexDataProvider._CANDLE_CACHE[cache_key] = (now_sec, candles)
+                    self.touch_event()
+                    return candles[-limit:]
+            # Intraday provider unavailable: Fail closed. Never fabricate replacement data.
+            logger.warning(f"No valid true intraday 5m provider data available for {clean_sym}. Failing closed.")
+            return []
+
+        # 4. Multi-timeframe aggregation from 5m base if target is 15m, 1h, 4h
+        elif timeframe in ("15m", "1h", "4h"):
+            base_5m = self.fetch_historical_candles_sync(clean_sym, timeframe="5m", limit=limit * 12, timeout=timeout)
+            if base_5m:
+                try:
+                    agg = aggregate_forex_candles(base_5m, timeframe, clean_sym)
+                    if agg:
+                        ForexDataProvider._CANDLE_CACHE[cache_key] = (now_sec, agg)
+                        return agg[-limit:]
+                except ValueError as exc:
+                    logger.warning(f"Aggregation failed for {clean_sym} to {timeframe}: {exc}")
+            return []
+
+        return []
+
+    def refresh_fx_candle_cache(
+        self,
+        symbol: str,
+        timeframe: str = "1d",
+        force: bool = False,
+    ) -> tuple[bool, int, str]:
+        """Explicit, tested refresh mechanism for Forex candle caches.
+
+        Guarantees:
+        - Strictly validates candles before writing to memory or disk.
+        - Preserves interval semantics (1d vs 5m).
+        - Prevents silent fallback to stale caches.
+        - Returns (success: bool, count: int, diagnostic_message: str).
+        """
+        resolved = SymbolResolver.resolve(symbol)
+        clean_sym = resolved.symbol if resolved else symbol
+        now_dt = datetime.now(UTC)
+
+        if timeframe == "1d":
+            candles = self._fetch_daily_ecb_rates(clean_sym, limit=360)
+            if not candles:
+                # Do NOT silently fallback to stale cache on explicit refresh attempt
+                return False, 0, f"Provider outage: ECB daily reference rates unavailable for {clean_sym}."
+            valid, msg = validate_candle_sequence(candles, expected_timeframe="1d")
+            if not valid:
+                return False, 0, f"Validation failure on fresh ECB candles for {clean_sym}: {msg}"
+
+            # Update memory cache
+            now_sec = now_dt.timestamp()
+            ForexDataProvider._CANDLE_CACHE[(clean_sym, "1d")] = (now_sec, candles)
+
+            # Persist to disk
             try:
-                with httpx.Client(timeout=4.0, headers={"User-Agent": "Mozilla/5.0"}) as tv_client:
-                    tv_resp = tv_client.post(
-                        "https://scanner.tradingview.com/forex/scan",
-                        json={
-                            "symbols": {"tickers": [f"FX_IDC:{clean_sym}", f"FX:{clean_sym}"]},
-                            "columns": [
-                                "close", "open", "high", "low", "ATR",
-                                "Perf.W", "Perf.1M", "Perf.3M", "Perf.6M",
-                                "SMA200", "SMA100", "SMA50", "SMA20", "EMA20",
-                                "open|240", "high|240", "low|240", "close|240",
-                                "open|60", "high|60", "low|60", "close|60",
-                                "open|15", "high|15", "low|15", "close|15",
-                                "open|5", "high|5", "low|5", "close|5",
-                            ],
-                        },
-                    )
-                    if tv_resp.status_code == 200:
-                        rows = tv_resp.json().get("data", [])
-                        if rows and rows[0].get("d") and rows[0]["d"][0] is not None:
-                            d = rows[0]["d"]
-                            cur_c = float(d[0])
-                            cur_o = float(d[1] or cur_c)
-                            cur_h = float(d[2] or cur_c)
-                            cur_l = float(d[3] or cur_c)
-                            atr_v = float(d[4] or (cur_c * 0.0025))
-                            perf_w = float(d[5] or 0.0) / 100.0
-                            perf_1m = float(d[6] or 0.0) / 100.0
-                            perf_3m = float(d[7] or 0.0) / 100.0
-                            perf_6m = float(d[8] or 0.0) / 100.0
-                            sma200 = float(d[9] or (cur_c / (1.0 + perf_6m)))
-                            sma100 = float(d[10] or (cur_c / (1.0 + perf_3m)))
-                            sma50 = float(d[11] or (cur_c / (1.0 + perf_1m)))
-                            sma20 = float(d[12] or (cur_c / (1.0 + perf_w)))
-                            ema20 = float(d[13] or cur_o)
-                            c_240 = float(d[17] or cur_o)
-                            c_60 = float(d[21] or cur_c)
-                            c_15 = float(d[25] or cur_c)
-                            c_5 = float(d[29] or cur_c)
+                import json as _json
 
-                            anchors = [
-                                cur_c / max(0.5, 1.0 + perf_6m),
-                                sma200,
-                                cur_c / max(0.5, 1.0 + perf_3m),
-                                sma100,
-                                cur_c / max(0.5, 1.0 + perf_1m),
-                                sma50,
-                                cur_c / max(0.5, 1.0 + perf_w),
-                                sma20,
-                                ema20,
-                                cur_o,
-                                c_240,
-                                c_60,
-                                c_15,
-                                c_5,
-                                cur_c,
-                            ]
-                            total_bars = 360
-                            seg_len = total_bars // (len(anchors) - 1)
-                            now_ts = int(datetime.now(UTC).timestamp())
-                            tv_series: list[Candle] = []
-                            prev_p = anchors[0]
-                            bar_idx = 0
-                            for seg_i in range(len(anchors) - 1):
-                                p_start = anchors[seg_i]
-                                p_end = anchors[seg_i + 1]
-                                steps = seg_len if seg_i < len(anchors) - 2 else (total_bars - bar_idx)
-                                for s_i in range(steps):
-                                    frac = (s_i + 1) / max(1, steps)
-                                    # Deterministic micro-wave from real ATR & bar index
-                                    wave = ((bar_idx % 7) - 3.0) * (atr_v * 0.08)
-                                    c_val = p_start + (p_end - p_start) * frac + (wave if bar_idx < total_bars - 1 else 0.0)
-                                    o_val = prev_p
-                                    band = max(abs(c_val - o_val) * 0.5, atr_v * 0.12)
-                                    h_val = max(o_val, c_val) + band
-                                    l_val = min(o_val, c_val) - band
-                                    ts_val = datetime.fromtimestamp(now_ts - (total_bars - 1 - bar_idx) * 300, tz=UTC)
-                                    tv_series.append(
-                                        Candle(
-                                            symbol=clean_sym,
-                                            timeframe="5m",
-                                            timestamp=ts_val,
-                                            open=round(o_val, prec),
-                                            high=round(h_val, prec),
-                                            low=round(l_val, prec),
-                                            close=round(c_val, prec),
-                                            volume=100000.0 + (bar_idx % 11) * 5000.0,
-                                        )
-                                    )
-                                    prev_p = c_val
-                                    bar_idx += 1
-                            if tv_series:
-                                tv_series[-1] = Candle(
-                                    symbol=clean_sym,
-                                    timeframe="5m",
-                                    timestamp=datetime.fromtimestamp(now_ts, tz=UTC),
-                                    open=round(tv_series[-1].open, prec),
-                                    high=round(max(tv_series[-1].high, cur_h, cur_c), prec),
-                                    low=round(min(tv_series[-1].low, cur_l, cur_c), prec),
-                                    close=round(cur_c, prec),
-                                    volume=125000.0,
-                                )
-                                ForexDataProvider._CANDLE_CACHE[(clean_sym, "5m")] = (now_sec, list(tv_series))
-                                self.touch_event()
-                                agg = _aggregate_from_base(tv_series, timeframe)
-                                return agg[-limit:]
+                disk_data = {}
+                if DISK_CACHE_PATH.exists():
+                    try:
+                        disk_data = _json.loads(DISK_CACHE_PATH.read_text(encoding="utf-8"))
+                    except Exception:
+                        disk_data = {}
+                disk_data[clean_sym] = [
+                    {
+                        "timestamp": c.timestamp.isoformat(),
+                        "open": c.open,
+                        "high": c.high,
+                        "low": c.low,
+                        "close": c.close,
+                        "volume": c.volume,
+                    }
+                    for c in candles
+                ]
+                DISK_CACHE_PATH.write_text(_json.dumps(disk_data, indent=2), encoding="utf-8")
             except Exception as exc:
-                logger.debug("TradingView FX multi-horizon candle backup failed", symbol=clean_sym, error=str(exc))
+                return True, len(candles), f"Validated and cached in memory, but disk write failed: {exc}"
 
-        return candles
+            return True, len(candles), f"Successfully refreshed {len(candles)} 1d candles for {clean_sym}."
+
+        elif timeframe == "5m":
+            candles = self._fetch_intraday_5m_candles(clean_sym, limit=240)
+            if not candles:
+                return False, 0, f"No genuine intraday 5m provider available for {clean_sym}."
+            valid, msg = validate_candle_sequence(candles, expected_timeframe="5m")
+            if not valid:
+                return False, 0, f"Validation failure on fresh 5m candles for {clean_sym}: {msg}"
+            now_sec = now_dt.timestamp()
+            ForexDataProvider._CANDLE_CACHE[(clean_sym, "5m")] = (now_sec, candles)
+            return True, len(candles), f"Successfully refreshed {len(candles)} 5m candles for {clean_sym}."
+
+        return False, 0, f"Unsupported timeframe {timeframe} for cache refresh."
 
     async def stream_raw_events(self) -> AsyncGenerator[RawMarketEvent, None]:
         import asyncio

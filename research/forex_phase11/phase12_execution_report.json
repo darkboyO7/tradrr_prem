@@ -1,0 +1,13 @@
+{
+  "credentials_configured": false,
+  "missing_keys": [
+    "OANDA_API_KEY",
+    "OANDA_ACCOUNT_ID"
+  ],
+  "authenticated_connection_success": false,
+  "instruments_verified": false,
+  "eurusd_retrieved": false,
+  "eurchf_retrieved": false,
+  "raw_artifacts": [],
+  "verdict": "BLOCKED"
+}

@@ -105,6 +105,20 @@ def test_desktop_startup_and_23_point_validation() -> None:
     assert win.lbl_symbol.text() == "TCS"
     assert win.lbl_signal_banner.text() in ("BUY", "SELL", "NO-TRADE")
     assert win.tray_icon is not None
+    assert win.btn_refresh_dashboard is not None
+    assert win.table_recent_outcomes is not None
+    assert win.table_recent_outcomes.columnCount() == 7
+    assert win.table_recent_outcomes.horizontalHeaderItem(0).text() == "Time (UTC)"
+    assert win.table_recent_outcomes.horizontalHeaderItem(6).text() == "Net Return"
+
+    # Verify Historical Pattern Analogs Table & Audio Notification Control
+    assert win.table_pattern_analogs is not None
+    assert win.table_pattern_analogs.columnCount() == 8
+    assert win.table_pattern_analogs.horizontalHeaderItem(0).text() == "Analog #"
+    assert win.table_pattern_analogs.horizontalHeaderItem(2).text() == "Similarity"
+    assert win.chk_notif_sound is not None
+    assert win.chk_notif_sound.isChecked() is True
+    assert controller.notification_settings.sound_enabled is True
 
     # Test System Tray Pause/Resume Predictions
     win._tray_pause_predictions()
@@ -126,4 +140,5 @@ def test_desktop_startup_and_23_point_validation() -> None:
     win._force_quit = True
     win.tray_icon.hide()
     win.close()
+    controller.stop_background_services()
     app.processEvents()

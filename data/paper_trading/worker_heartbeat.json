@@ -1,0 +1,45 @@
+{
+  "worker_state": "RUNNING",
+  "process_id": 20408,
+  "start_time": "2026-10-20T06:30:44.544791+00:00",
+  "uptime_seconds": 493.6,
+  "last_heartbeat": "2026-10-20T06:38:58.107201+00:00",
+  "last_successful_cycle": "2026-10-20T06:38:58.107192+00:00",
+  "last_prediction_time": "2026-10-20T06:38:56.699156+00:00",
+  "last_resolution_time": null,
+  "retry_count": 0,
+  "consecutive_errors": 0,
+  "last_error": null,
+  "recent_exceptions": [],
+  "last_data_time": {
+    "EURUSD": "2026-10-20T06:38:56.955400+00:00",
+    "EURAUD": "2026-10-20T06:38:57.165358+00:00",
+    "EURCAD": "2026-10-20T06:38:57.868900+00:00",
+    "EURCHF": "2026-10-20T06:38:58.102532+00:00"
+  },
+  "last_completed_candle": {
+    "EURUSD": "2026-10-20T03:51:32.104549+00:00",
+    "EURAUD": "2026-10-20T06:38:21.551120+00:00",
+    "EURCAD": "2026-10-09T16:00:00+00:00",
+    "EURCHF": "2026-10-20T03:38:40.866405+00:00"
+  },
+  "last_prediction_time_by_symbol": {
+    "EURUSD": "2026-10-20T06:30:44.545283+00:00",
+    "EURAUD": "2026-10-20T06:38:56.699156+00:00",
+    "EURCAD": "2026-10-20T06:30:44.545283+00:00",
+    "EURCHF": "2026-10-20T06:30:44.545283+00:00"
+  },
+  "clock_skew_seconds": {
+    "EURUSD": 0.26,
+    "EURAUD": 0.47,
+    "EURCAD": 1.17,
+    "EURCHF": 1.4
+  },
+  "is_eligible_to_generate": {
+    "EURUSD": false,
+    "EURAUD": true,
+    "EURCAD": false,
+    "EURCHF": false
+  },
+  "overall_eligible": true
+}

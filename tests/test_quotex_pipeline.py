@@ -84,14 +84,14 @@ def test_step_3_and_4_live_quote_and_historical_candles():
     adapter = QuotexMarketDataAdapter()
 
     # Live quote
-    q = adapter.fetch_live_quote_sync("EURUSD")
-    assert q is not None, "Failed fetching live quote for QUOTEX:EURUSD"
+    q = adapter.fetch_live_quote_sync("BTCUSD_QX")
+    assert q is not None, "Failed fetching live quote for QUOTEX:BTCUSD_QX"
     assert q.raw_payload["price"] > 0
-    assert q.raw_payload["underlying_instrument"] == "FX:EURUSD"
+    assert q.raw_payload["underlying_instrument"] == "CRYPTO:BTC-USD"
     assert "timestamp" in q.raw_payload
 
     # Multi-timeframe historical candles
-    mtf = adapter.fetch_multi_timeframe_candles_sync("EURUSD", ["5m", "15m", "1h"], limit=25)
+    mtf = adapter.fetch_multi_timeframe_candles_sync("BTCUSD_QX", ["5m", "15m", "1h"], limit=50)
     for tf in ("5m", "15m", "1h"):
         assert tf in mtf
         assert len(mtf[tf]) >= 20, f"Expected at least 20 historical bars for {tf}, got {len(mtf[tf])}"
@@ -101,7 +101,7 @@ def test_step_3_and_4_live_quote_and_historical_candles():
 def test_step_5_generate_features():
     """Requirement 8, Step 5: Ingest data into FeaturePipeline and verify feature calculation."""
     state_svc = MarketStateService.get_instance()
-    state = state_svc.ensure_instrument_state("QUOTEX:EURUSD", timeframe="5m")
+    state = state_svc.ensure_instrument_state("QUOTEX:BTCUSD_QX", timeframe="5m")
     assert state is not None
     assert state.last_price > 0
 
@@ -120,7 +120,7 @@ def test_step_5_generate_features():
 
 def test_step_6_produce_prediction_with_trade_levels():
     """Requirement 8, Step 6: Produce prediction with confidence and entry/stop/target levels."""
-    eval_res = run_live_intelligence_pipeline("QUOTEX:EURUSD", timeframe="5m", horizon="1h")
+    eval_res = run_live_intelligence_pipeline("QUOTEX:BTCUSD_QX", timeframe="5m", horizon="1h")
     assert eval_res["status"] == "OK"
     dec = eval_res["decision"]
     assert dec is not None
@@ -134,7 +134,7 @@ def test_step_6_produce_prediction_with_trade_levels():
 
 def test_step_7_prediction_written_to_ledger():
     """Requirement 8, Step 7: Verify prediction written to PredictionLedgerService."""
-    eval_res = run_live_intelligence_pipeline("QUOTEX:EURUSD", timeframe="5m", horizon="1h")
+    eval_res = run_live_intelligence_pipeline("QUOTEX:BTCUSD_QX", timeframe="5m", horizon="1h")
     fc = eval_res["forecast"]
     assert fc is not None
 
@@ -145,7 +145,7 @@ def test_step_7_prediction_written_to_ledger():
     assert pred_id in ledger._active_predictions
     assert ledger.total_recorded == initial_recorded + 1
     active_rec = ledger._active_predictions[pred_id]
-    assert active_rec.canonical_symbol == "QUOTEX:EURUSD"
+    assert active_rec.canonical_symbol == "QUOTEX:BTCUSD_QX"
     assert active_rec.entry_price > 0
 
 
@@ -155,17 +155,12 @@ def test_step_8_desktop_service_layer_receives_prediction():
     rows = ctrl.get_quotex_section_rows(horizon="1h")
     assert len(rows) == 39
 
-    # Find EURUSD row
-    eurusd_row = next((r for r in rows if r["symbol"] == "EURUSD"), None)
-    assert eurusd_row is not None
-    assert eurusd_row["signal"] in ("BUY", "SELL", "NO-TRADE")
-    assert eurusd_row["price"] > 0
-    assert eurusd_row["live_status"] in (
-        "PROXY (FX SPOT UNDERLYING)",
-        "PROXY (FX OTC INTERBANK)",
-        "PROXY (INTERBANK FX)",
-        "VERIFIED UNDERLYING",
-    )
+    # Find BTCUSD_QX row
+    btc_row = next((r for r in rows if r["symbol"] == "BTCUSD_QX"), None)
+    assert btc_row is not None
+    assert btc_row["signal"] in ("BUY", "SELL", "NO-TRADE")
+    assert btc_row["price"] > 0
+    assert "CRYPTO" in btc_row["live_status"] or "VERIFIED" in btc_row["live_status"] or "PROXY" in btc_row["live_status"]
 
     # Find Synthetic OTC row
     msft_row = next((r for r in rows if r["symbol"] == "MSFT_OTC"), None)
@@ -175,15 +170,15 @@ def test_step_8_desktop_service_layer_receives_prediction():
     assert "No authorized live OTC feed" in msft_row["rationale"] or "No authorized public market data feed" in msft_row["rationale"]
 
     # Full beginner evaluation payload
-    payload = ctrl.evaluate_instrument("QUOTEX:EURUSD", timeframe="5m", horizon="1h")
-    assert payload["canonical_symbol"] == "QUOTEX:EURUSD"
+    payload = ctrl.evaluate_instrument("QUOTEX:BTCUSD_QX", timeframe="5m", horizon="1h")
+    assert payload["canonical_symbol"] == "QUOTEX:BTCUSD_QX"
     assert len(payload.get("candles", [])) >= 20
     assert "why_bullets" in payload
 
 
 def test_step_9_simulate_outcome_resolution_and_ledger_update():
     """Requirement 8, Step 9: Simulate outcome resolution and ledger update."""
-    eval_res = run_live_intelligence_pipeline("QUOTEX:EURUSD", timeframe="5m", horizon="1h")
+    eval_res = run_live_intelligence_pipeline("QUOTEX:BTCUSD_QX", timeframe="5m", horizon="1h")
     fc = eval_res["forecast"]
     ledger = PredictionLedgerService.get_instance()
 
@@ -205,7 +200,7 @@ def test_step_9_simulate_outcome_resolution_and_ledger_update():
 
 def test_quotex_diagnostic_audit_health():
     """Verify that the diagnostic audit report passes all 10 stages and explicitly marks direct Quotex API as 0 (BLOCKED)."""
-    report = run_quotex_pipeline_audit()
+    report = run_quotex_pipeline_audit("QUOTEX:BTCUSD_QX")
     assert report["total_discovered_quotex_instruments"] == 39
     assert report["verified_quotex_platform_feeds_count"] == 0
     assert "BLOCKED" in report["direct_quotex_platform_status"]

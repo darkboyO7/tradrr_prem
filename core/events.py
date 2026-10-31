@@ -21,6 +21,15 @@ class ProviderState(str, Enum):
     FAILED = "FAILED"
 
 
+class DataSourceState(str, Enum):
+    """Explicit state classification for market data source provenance."""
+    LIVE_VERIFIED = "LIVE_VERIFIED"
+    DELAYED = "DELAYED"
+    CACHED = "CACHED"
+    STALE = "STALE"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
 class TradeSide(str, Enum):
     """Order / Trade execution side."""
     BUY = "BUY"
@@ -104,6 +113,9 @@ class Candle(BaseModel):
     trade_count: int = Field(default=0, ge=0)
     vwap: float | None = Field(default=None, gt=0)
     is_closed: bool = Field(default=False, description="True once the period is completed")
+    source_provider: str | None = Field(default=None, description="Data provider identifier (e.g. ECB_FRANKFURTER, TRADINGVIEW)")
+    source_interval: str | None = Field(default=None, description="Native source interval (e.g. '1d', '5m')")
+    retrieved_at: datetime | None = Field(default=None, description="UTC timestamp when data was retrieved")
 
 
 class DataQualitySeverity(str, Enum):

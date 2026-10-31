@@ -66,12 +66,15 @@ def temp_learning_env():
             rollback_window_size=10,
         )
 
+        pending_file = tmp_path / "pending_predictions.jsonl"
         yield {
             "tmp_path": tmp_path,
             "controller": ctrl,
             "state_file": state_file,
             "audit_file": audit_file,
             "registry": registry,
+            "ledger_file": ledger_file,
+            "pending_file": pending_file,
         }
 
         ctrl.stop_background_loop()
@@ -196,9 +199,13 @@ def test_02_prediction_pending_until_horizon_or_barrier():
     assert ledger._active_predictions[pred_id].highest_seen == 2510.0
 
 
-def test_03_prediction_outcome_resolution_and_triple_barrier():
+def test_03_prediction_outcome_resolution_and_triple_barrier(temp_learning_env):
     """Requirement 3: Resolve predictions correctly against price action (Target Hit = WIN, Stop Hit = LOSS)."""
-    ledger = PredictionLedgerService(load_persisted=False)
+    ledger = PredictionLedgerService(
+        load_persisted=False,
+        ledger_file=temp_learning_env["ledger_file"],
+        pending_ledger_file=temp_learning_env["pending_file"],
+    )
     now = datetime.now(UTC)
     fc = make_forecast(
         symbol="NSE:INFY",
@@ -236,9 +243,13 @@ def test_03_prediction_outcome_resolution_and_triple_barrier():
     assert pred_id not in ledger._active_predictions
 
 
-def test_04_outcome_deduplication_and_idempotency():
+def test_04_outcome_deduplication_and_idempotency(temp_learning_env):
     """Requirement 4: Ensure outcomes are resolved exactly once without duplication."""
-    ledger = PredictionLedgerService(load_persisted=False)
+    ledger = PredictionLedgerService(
+        load_persisted=False,
+        ledger_file=temp_learning_env["ledger_file"],
+        pending_ledger_file=temp_learning_env["pending_file"],
+    )
     now = datetime.now(UTC)
     fc = make_forecast(
         symbol="NSE:SBIN",

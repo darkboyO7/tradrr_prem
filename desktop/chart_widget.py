@@ -72,6 +72,32 @@ class LiveCandlestickChartWidget(QWidget):
             return f"${val:,.2f}"
         return f"{val:,.2f}"
 
+    @staticmethod
+    def _calc_ema(closes: list[float], period: int) -> list[float | None]:
+        """Compute exponential moving average across candle closes."""
+        if not closes or len(closes) < 2:
+            return [None] * len(closes)
+        k = 2.0 / (period + 1.0)
+        ema_arr: list[float | None] = []
+        if len(closes) < period:
+            seed = sum(closes) / len(closes)
+            cur = seed
+            for val in closes:
+                cur = (val - cur) * k + cur
+                ema_arr.append(cur)
+            return ema_arr
+        sma = sum(closes[:period]) / period
+        cur = sma
+        for i, val in enumerate(closes):
+            if i < period - 1:
+                ema_arr.append(None)
+            elif i == period - 1:
+                ema_arr.append(cur)
+            else:
+                cur = (val - cur) * k + cur
+                ema_arr.append(cur)
+        return ema_arr
+
     def paintEvent(self, event: Any) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -148,15 +174,29 @@ class LiveCandlestickChartWidget(QWidget):
         painter.setFont(header_font)
         painter.setPen(QColor("#94A3B8"))
         painter.drawText(
-            QRectF(left_pad, 6, plot_w, 20),
+            QRectF(left_pad, 6, plot_w * 0.52, 20),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            f"LIVE INTRADAY PRICE & SESSION VWAP — {self._symbol} ({len(self._candles)} bars)",
+            f"LIVE INTRADAY PRICE — {self._symbol} ({len(self._candles)} bars)",
         )
+        legend_font = QFont("Segoe UI", 8, QFont.Weight.Bold)
+        painter.setFont(legend_font)
+        painter.setPen(QColor("#F59E0B"))
+        painter.drawText(QRectF(left_pad + plot_w * 0.53, 6, 65, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "— VWAP")
+        painter.setPen(QColor("#06B6D4"))
+        painter.drawText(QRectF(left_pad + plot_w * 0.53 + 70, 6, 70, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "— EMA20")
+        painter.setPen(QColor("#A855F7"))
+        painter.drawText(QRectF(left_pad + plot_w * 0.53 + 145, 6, 70, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "— EMA50")
 
-        # Draw Candlesticks & compute running session VWAP
+        # Draw Candlesticks & compute running session VWAP + indicators
         n = len(self._candles)
         step_x = plot_w / max(n, 1)
         body_w = max(3.0, min(14.0, step_x * 0.68))
+
+        closes = [float(c.get("close", 0.0)) for c in self._candles]
+        ema20 = self._calc_ema(closes, 20)
+        ema50 = self._calc_ema(closes, 50)
+        max_vol = max([float(c.get("volume", 1.0)) for c in self._candles] or [1.0])
+        vol_plot_h = plot_rect.height() * 0.16
 
         cum_pv = 0.0
         cum_v = 0.0
@@ -183,6 +223,12 @@ class LiveCandlestickChartWidget(QWidget):
             is_bull = c_p >= o_p
             color = QColor("#10B981") if is_bull else QColor("#EF4444")
 
+            # Volume bar at bottom
+            v_h = max(2.0, (vol / max(max_vol, 1.0)) * vol_plot_h)
+            v_rect = QRectF(cx - body_w / 2.0, plot_rect.bottom() - v_h, body_w, v_h)
+            v_col = QColor(16, 185, 129, 60) if is_bull else QColor(239, 68, 68, 60)
+            painter.fillRect(v_rect, v_col)
+
             # Wick
             painter.setPen(QPen(color, 1.3))
             painter.drawLine(QPointF(cx, price_to_y(h_p)), QPointF(cx, price_to_y(l_p)))
@@ -195,13 +241,39 @@ class LiveCandlestickChartWidget(QWidget):
             body_rect = QRectF(cx - body_w / 2.0, top_y, body_w, body_h)
             painter.fillRect(body_rect, color)
 
-        # Draw VWAP line
+        # Draw VWAP line (amber)
         if len(vwap_points) >= 2:
             vwap_path = QPainterPath(vwap_points[0])
             for pt in vwap_points[1:]:
                 vwap_path.lineTo(pt)
             painter.setPen(QPen(QColor("#F59E0B"), 1.8))
             painter.drawPath(vwap_path)
+
+        # Draw EMA 20 line (cyan)
+        ema20_pts = [
+            QPointF(plot_rect.left() + (i + 0.5) * step_x, price_to_y(val))
+            for i, val in enumerate(ema20)
+            if val is not None
+        ]
+        if len(ema20_pts) >= 2:
+            path20 = QPainterPath(ema20_pts[0])
+            for pt in ema20_pts[1:]:
+                path20.lineTo(pt)
+            painter.setPen(QPen(QColor("#06B6D4"), 1.4))
+            painter.drawPath(path20)
+
+        # Draw EMA 50 line (purple)
+        ema50_pts = [
+            QPointF(plot_rect.left() + (i + 0.5) * step_x, price_to_y(val))
+            for i, val in enumerate(ema50)
+            if val is not None
+        ]
+        if len(ema50_pts) >= 2:
+            path50 = QPainterPath(ema50_pts[0])
+            for pt in ema50_pts[1:]:
+                path50.lineTo(pt)
+            painter.setPen(QPen(QColor("#A855F7"), 1.4))
+            painter.drawPath(path50)
 
         # Draw Entry, Stop Loss, and Target overlays when BUY or SELL
         def draw_level_line(price_val: float, label: str, hex_color: str) -> None:
@@ -232,11 +304,14 @@ class LiveCandlestickChartWidget(QWidget):
         if hovered_idx is not None and 0 <= hovered_idx < len(self._candles):
             hc = self._candles[hovered_idx]
             ts_str = str(hc.get("timestamp", ""))[-14:-6] or str(hc.get("timestamp", ""))[:16]
+            vol_val = float(hc.get("volume", 0.0))
+            vol_str = f"{vol_val:,.0f}" if vol_val >= 1 else f"{vol_val:.2f}"
             info = (
                 f"Bar [{ts_str}]   O: {self._fmt_price(float(hc.get('open', 0)))}   "
                 f"H: {self._fmt_price(float(hc.get('high', 0)))}   "
                 f"L: {self._fmt_price(float(hc.get('low', 0)))}   "
-                f"C: {self._fmt_price(float(hc.get('close', 0)))}"
+                f"C: {self._fmt_price(float(hc.get('close', 0)))}   "
+                f"Vol: {vol_str}"
             )
             painter.setFont(QFont("Segoe UI", 8, QFont.Weight.DemiBold))
             painter.setPen(QColor("#E2E8F0"))

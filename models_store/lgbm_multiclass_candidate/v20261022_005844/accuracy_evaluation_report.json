@@ -1,0 +1,86 @@
+{
+  "model_id": "lgbm_multiclass_candidate",
+  "version": "v20261022_005844",
+  "evaluated_at": "2026-10-22T01:09:30.413427+00:00",
+  "target_description": "Forward 3-Bar Equity Return Multiclass [0=SELL, 1=NEUTRAL, 2=BUY]",
+  "forecast_horizon": "15m",
+  "sample_size": 211,
+  "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+  "overall_accuracy": 0.5498,
+  "overall_accuracy_pct": 54.98,
+  "wilson_ci_lower_95": 0.4823,
+  "wilson_ci_upper_95": 0.6154,
+  "wilson_ci_lower_pct": 48.23,
+  "wilson_ci_upper_pct": 61.54,
+  "target_accuracy_hurdle": 0.95,
+  "confusion_matrix": [
+    [
+      55,
+      0,
+      36
+    ],
+    [
+      22,
+      0,
+      15
+    ],
+    [
+      22,
+      0,
+      61
+    ]
+  ],
+  "per_class_metrics": {
+    "SELL": {
+      "class_id": 0,
+      "class_name": "SELL",
+      "support": 91,
+      "true_positives": 55,
+      "false_positives": 44,
+      "false_negatives": 36,
+      "precision": 0.5556,
+      "recall": 0.6044,
+      "f1_score": 0.5789
+    },
+    "NEUTRAL": {
+      "class_id": 1,
+      "class_name": "NEUTRAL",
+      "support": 37,
+      "true_positives": 0,
+      "false_positives": 0,
+      "false_negatives": 37,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1_score": 0.0
+    },
+    "BUY": {
+      "class_id": 2,
+      "class_name": "BUY",
+      "support": 83,
+      "true_positives": 61,
+      "false_positives": 51,
+      "false_negatives": 22,
+      "precision": 0.5446,
+      "recall": 0.7349,
+      "f1_score": 0.6256
+    }
+  },
+  "class_distribution": {
+    "SELL": 91,
+    "NEUTRAL": 37,
+    "BUY": 83
+  },
+  "brier_score": 0.6173,
+  "expected_calibration_error": 0.105,
+  "coverage_rate_pct": 100.0,
+  "abstention_rate_pct": 0.0,
+  "active_sample_count": 211,
+  "active_trade_accuracy_pct": 54.98,
+  "active_trade_win_rate_pct": 63.03,
+  "active_trade_expectancy_pct": 0.3192,
+  "leakage_checks_passed": true,
+  "leakage_audit_log": [],
+  "rejection_reasons": [
+    "Measured accuracy is 54.98% (Wilson 95% CI Lower Bound: 48.23%), which is below the mandatory 95.0% acceptance gate."
+  ]
+}

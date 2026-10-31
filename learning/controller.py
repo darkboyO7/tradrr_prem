@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from enum import Enum
 import hashlib
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -34,8 +35,26 @@ from models.registry import ModelRegistry
 
 logger = get_logger("learning_controller")
 
-DEFAULT_STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "learning" / "learning_controller_state.json"
-DEFAULT_AUDIT_LOG_FILE = Path(__file__).resolve().parent.parent / "data" / "learning" / "learning_audit_ledger.jsonl"
+PROD_STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "learning" / "learning_controller_state.json"
+PROD_AUDIT_LOG_FILE = Path(__file__).resolve().parent.parent / "data" / "learning" / "learning_audit_ledger.jsonl"
+PROD_LEDGER_FILE = Path(__file__).resolve().parent.parent / "data" / "ledger" / "prediction_outcomes.jsonl"
+DEFAULT_STATE_FILE = PROD_STATE_FILE
+DEFAULT_AUDIT_LOG_FILE = PROD_AUDIT_LOG_FILE
+
+
+def _assert_not_writing_to_production_in_test(target_file: Path) -> None:
+    """Safety guardrail preventing automated tests from modifying production continuous learning files."""
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("ALLOW_PRODUCTION_FILE_MUTATION_IN_TEST"):
+        try:
+            resolved_target = target_file.resolve()
+            if resolved_target in (PROD_STATE_FILE.resolve(), PROD_AUDIT_LOG_FILE.resolve(), PROD_LEDGER_FILE.resolve()):
+                raise PermissionError(
+                    f"TEST ISOLATION VIOLATION: Refusing to write to production learning file '{target_file}' during test execution. "
+                    "Tests must use isolated temporary files or fixtures."
+                )
+        except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
 
 
 class LearningState(str, Enum):
@@ -142,11 +161,8 @@ class ContinuousLearningController:
     ) -> None:
         self.state_file = Path(state_file or DEFAULT_STATE_FILE)
         self.audit_log_file = Path(audit_log_file or DEFAULT_AUDIT_LOG_FILE)
-        self.ledger_file = (
-            Path(ledger_file)
-            if ledger_file is not None
-            else (Path(__file__).resolve().parent.parent / "data" / "ledger" / "prediction_outcomes.jsonl")
-        )
+        from learning.ledger import LEDGER_FILE_PATH
+        self.ledger_file = Path(ledger_file or LEDGER_FILE_PATH)
         self.registry = model_registry or ModelRegistry()
 
         self.min_samples_to_retrain = min_samples_to_retrain
@@ -160,6 +176,7 @@ class ContinuousLearningController:
         # Additional governance & anti-leakage attributes
         self.holdout_eval_count: int = 0
         self.min_oos_samples: int = 30
+        self.auto_promote: bool = True
         self._dataset_timestamps: list[Any] = []
         self._dataset_horizons: list[int] = []
 
@@ -278,6 +295,7 @@ class ContinuousLearningController:
 
     def _save_state(self) -> None:
         """Persist current controller state to JSON file."""
+        _assert_not_writing_to_production_in_test(self.state_file)
         try:
             payload = {
                 "state": self.state.value,
@@ -299,15 +317,20 @@ class ContinuousLearningController:
             temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
             temp_path.replace(self.state_file)
         except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
             logger.error("Failed persisting learning controller state", error=str(exc))
 
     def _append_audit_log(self, cycle_res: LearningCycleResult) -> None:
         """Record immutable cycle audit record to JSONL."""
+        _assert_not_writing_to_production_in_test(self.audit_log_file)
         try:
             line = cycle_res.model_dump_json()
             with self.audit_log_file.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
         except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
             logger.warning("Failed appending to learning audit log", error=str(exc))
 
     # =========================================================================
@@ -380,6 +403,12 @@ class ContinuousLearningController:
         from learning.ledger import PredictionLedgerService
 
         ledger = PredictionLedgerService.get_instance()
+        # Resolve any matured pending predictions before collecting eligible samples
+        try:
+            ledger.resolve_pending_forecasts()
+        except Exception as exc:
+            logger.warning("Error resolving pending forecasts during outcome collection", error=str(exc))
+
         seen_ids: set[str] = set()
         eligible: list[dict[str, Any]] = []
 
@@ -388,12 +417,20 @@ class ContinuousLearningController:
             pid = str(rec.get("prediction_id", ""))
             if not pid or pid in seen_ids:
                 continue
-            feats = rec.get("features_used") or {}
-            has_outcome = rec.get("outcome") in ("WIN", "LOSS", "NEUTRAL")
+            status = rec.get("status", "RESOLVED")
+            outcome = rec.get("outcome")
             exit_p = rec.get("exit_price")
-            if (has_outcome or (exit_p is not None and float(exit_p) > 0)) and len(feats) > 0:
-                seen_ids.add(pid)
-                eligible.append(rec)
+            feats = rec.get("features_used") or {}
+
+            if status != "RESOLVED" or outcome not in ("WIN", "LOSS", "NEUTRAL"):
+                continue
+            if exit_p is None or float(exit_p) <= 0:
+                continue
+            if len(feats) == 0:
+                continue
+
+            seen_ids.add(pid)
+            eligible.append(rec)
 
         # 2. From persistent JSONL ledger file
         ledger_path = self.ledger_file
@@ -407,12 +444,20 @@ class ContinuousLearningController:
                     pid = str(rec.get("prediction_id", ""))
                     if not pid or pid in seen_ids:
                         continue
-                    feats = rec.get("features_used") or {}
-                    has_outcome = rec.get("outcome") in ("WIN", "LOSS", "NEUTRAL")
+                    status = rec.get("status", "RESOLVED")
+                    outcome = rec.get("outcome")
                     exit_p = rec.get("exit_price")
-                    if (has_outcome or (exit_p is not None and float(exit_p) > 0)) and len(feats) > 0:
-                        seen_ids.add(pid)
-                        eligible.append(rec)
+                    feats = rec.get("features_used") or {}
+
+                    if status != "RESOLVED" or outcome not in ("WIN", "LOSS", "NEUTRAL"):
+                        continue
+                    if exit_p is None or float(exit_p) <= 0:
+                        continue
+                    if len(feats) == 0:
+                        continue
+
+                    seen_ids.add(pid)
+                    eligible.append(rec)
             except Exception as exc:
                 logger.warning("Error reading JSONL outcomes during collection", error=str(exc))
 
@@ -749,6 +794,8 @@ class ContinuousLearningController:
             "unique_classes_predicted": len(predicted_classes),
             "predicted_classes": [a.value for a in predicted_classes],
             "brier_per_sample": briers,
+            "is_fully_supported": getattr(model, "is_fully_supported", True),
+            "fitted_classes": getattr(model, "fitted_classes_", [0, 1, 2]),
         }
 
     # =========================================================================
@@ -770,6 +817,9 @@ class ContinuousLearningController:
         5. Directional accuracy: candidate accuracy >= champion accuracy - 2.0%.
         6. Deflated Sharpe / holdout reuse penalty if holdout is repeatedly evaluated.
         """
+        if not getattr(self, "auto_promote", True):
+            return False, "Automated model promotion disabled by governance policy POL-GOV-2026-001 (evaluation-only mode)"
+
         n_oos = candidate_metrics.get("oos_samples", 0)
         min_required_oos = min(self.min_oos_samples, max(4, int(self.min_samples_to_retrain * 0.3)))
         if n_oos < min_required_oos:
@@ -1219,20 +1269,20 @@ class ContinuousLearningController:
             rollback_executed = False
             rollback_reason = ""
 
-            if not promoted:
-                rollback_needed, rollback_reason = self._check_production_rollback(outcomes)
-                if rollback_needed and self.previous_champion_id != self.active_champion_id:
-                    self.state = LearningState.ROLLING_BACK
-                    self._save_state()
-                    logger.warning(
-                        "ROLLBACK TRIGGERED",
-                        from_model=self.active_champion_id,
-                        to_model=self.previous_champion_id,
-                        reason=rollback_reason,
-                    )
-                    self.active_champion_id = self.previous_champion_id
-                    self._ensure_champion_loaded()
-                    rollback_executed = True
+            rollback_needed, rollback_reason = self._check_production_rollback(outcomes)
+            if rollback_needed and self.previous_champion_id != self.active_champion_id:
+                self.state = LearningState.ROLLING_BACK
+                self._save_state()
+                logger.warning(
+                    "ROLLBACK TRIGGERED",
+                    from_model=self.active_champion_id,
+                    to_model=self.previous_champion_id,
+                    reason=rollback_reason,
+                )
+                self.active_champion_id = self.previous_champion_id
+                self._ensure_champion_loaded()
+                rollback_executed = True
+                promoted = False
 
             # 7. IDLE & CLEANUP
             self.state = LearningState.IDLE

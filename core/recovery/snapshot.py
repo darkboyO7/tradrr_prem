@@ -8,6 +8,7 @@ active positions, trade ledger, and risk limits.
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import uuid
@@ -55,7 +56,8 @@ class SnapshotManager:
     """Manages creation, verification, and rehydration of state snapshots."""
 
     def __init__(self, snapshot_dir: Optional[Path] = None) -> None:
-        self.snapshot_dir = snapshot_dir or Path("data/snapshots")
+        env_snap = os.environ.get("SNAPSHOT_DIR")
+        self.snapshot_dir = snapshot_dir or (Path(env_snap) if env_snap else Path("data/snapshots"))
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     def _compute_checksum(self, payload_dict: Dict[str, Any]) -> str:

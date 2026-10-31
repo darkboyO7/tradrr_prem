@@ -35,7 +35,7 @@ from signals.fusion import run_live_intelligence_pipeline
 from signals.scanner import MarketScannerService
 
 
-def run_quotex_pipeline_audit(deep_sample_symbol: str = "QUOTEX:EURUSD") -> dict[str, Any]:
+def run_quotex_pipeline_audit(deep_sample_symbol: str = "QUOTEX:BTCUSD_QX") -> dict[str, Any]:
     """Execute a complete 10-stage audit of the Quotex integration pipeline."""
     t_audit_start = time.perf_counter()
 

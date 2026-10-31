@@ -9,9 +9,11 @@ PredictionLedgerService, and SystemGovernanceController).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
+from pathlib import Path
 import time
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from core.instrument import Instrument, MarketType
 from core.logging import get_logger
@@ -58,6 +60,33 @@ class StartupCheckResult:
             and self.prediction_engine_ok
         )
 
+    @property
+    def summary(self) -> str:
+        """Concise human-readable status summary of all startup checks."""
+        status = "PASSED" if self.all_critical_ok else "FAILED"
+        return (
+            f"StartupCheckResult({status} - data: {self.data_ok}, db: {self.database_ok}, "
+            f"models: {self.models_ok}, market: {self.market_connection_ok}, prediction: {self.prediction_engine_ok})"
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert startup check results to a serializable dictionary."""
+        return {
+            "all_critical_ok": self.all_critical_ok,
+            "data_ok": self.data_ok,
+            "data_detail": self.data_detail,
+            "database_ok": self.database_ok,
+            "database_detail": self.database_detail,
+            "models_ok": self.models_ok,
+            "models_detail": self.models_detail,
+            "market_connection_ok": self.market_connection_ok,
+            "market_connection_detail": self.market_connection_detail,
+            "prediction_engine_ok": self.prediction_engine_ok,
+            "prediction_engine_detail": self.prediction_engine_detail,
+            "summary": self.summary,
+            "step_logs": list(self.step_logs),
+        }
+
 
 @dataclass
 class NotificationSettings:
@@ -70,6 +99,7 @@ class NotificationSettings:
     data_failure: bool = True
     model_update: bool = True
     connection_lost: bool = True
+    sound_enabled: bool = True
     cooldown_seconds: float = 120.0
 
 
@@ -77,6 +107,12 @@ class DesktopServiceController:
     """Local application service layer bridging the Desktop UI and Trading Backend."""
 
     def __init__(self) -> None:
+        try:
+            from desktop.app import setup_desktop_file_logging
+
+            setup_desktop_file_logging()
+        except Exception:
+            pass
         self.predictions_paused: bool = False
         self.notification_settings = NotificationSettings()
         self._last_notification_ts: dict[str, float] = {}
@@ -98,6 +134,7 @@ class DesktopServiceController:
         self._recent_logs.append(entry)
         if len(self._recent_logs) > 250:
             self._recent_logs.pop(0)
+        logger.info(message)
 
     def get_recent_logs(self) -> list[str]:
         return list(self._recent_logs)
@@ -209,7 +246,12 @@ class DesktopServiceController:
         try:
             from learning.controller import ContinuousLearningController
 
+            ledger = PredictionLedgerService.get_instance()
+            ledger.start_background_resolver()
+            self.log_event("Prediction outcome resolver background worker started")
+
             learning_ctrl = ContinuousLearningController.get_instance()
+            learning_ctrl.auto_promote = False
             learning_ctrl.start_background_loop()
             self.log_event(f"Continuous learning controller active (Champion: {learning_ctrl.active_champion_id})")
         except Exception as exc:
@@ -291,6 +333,8 @@ class DesktopServiceController:
             )
             return {
                 "status": "QUOTEX_DATA_UNAVAILABLE",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "data_timestamp": None,
                 "symbol": inst.symbol,
                 "canonical_symbol": canon,
                 "market": "QUOTEX",
@@ -308,6 +352,7 @@ class DesktopServiceController:
                 "last_price": 0.0,
                 "price_display": "QUOTEX DATA UNAVAILABLE",
                 "signal": "NO-TRADE",
+                "action": "NO-TRADE",
                 "confidence_pct": 0,
                 "horizon": horizon,
                 "horizon_label": self._format_horizon_label(horizon),
@@ -367,8 +412,8 @@ class DesktopServiceController:
         if st_obj and st_obj.last_price > 0:
             try:
                 ledger.resolve_pending_forecasts(canon, st_obj.last_price)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.log_event(f"Ledger resolve warning for {canon}: {exc}")
         if fc is not None and res.get("status") == "OK" and not self.predictions_paused:
             try:
                 active_model = ledger.champion_model_id
@@ -393,16 +438,14 @@ class DesktopServiceController:
                         "developing_day": res.get("developing_day"),
                     },
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                self.log_event(f"Ledger record forecast warning for {canon}: {exc}")
 
         # Determine session status (Section 16: Offline / Market-Closed Mode)
-        session = SymbolResolver.get_session(inst_obj.market) if inst_obj else None
-        is_open = bool(session.is_open()) if session else (bool(st_obj.session_open) if st_obj else False)
-        if inst_obj and inst_obj.market in (MarketType.CRYPTO, MarketType.QUOTEX):
-            is_open = True
-
-        session_badge = "● LIVE" if is_open else "MARKET CLOSED"
+        mkt_name = inst_obj.market.value if inst_obj else "NSE"
+        timing_info = self.get_market_session_status(mkt_name)
+        is_open = timing_info["is_open"]
+        session_badge = timing_info["badge"]
         last_price = float(st_obj.last_price) if (st_obj and st_obj.last_price > 0) else float(decision.entry_price or 0.0)
         currency = inst_obj.quote_currency if inst_obj else "INR"
 
@@ -441,8 +484,14 @@ class DesktopServiceController:
             is_stale=bool(st_obj.is_stale) if st_obj else False,
         )
 
+        eval_iso = datetime.now(timezone.utc).isoformat()
+        data_ts = getattr(st_obj, "last_timestamp", None) if st_obj else None
+        data_ts_iso = data_ts.isoformat() if hasattr(data_ts, "isoformat") else (str(data_ts) if data_ts else eval_iso)
+
         return {
             "status": res.get("status", "OK"),
+            "timestamp": eval_iso,
+            "data_timestamp": data_ts_iso,
             "symbol": inst_obj.symbol if inst_obj else canon,
             "canonical_symbol": canon,
             "market": inst_obj.market.value if inst_obj else "NSE",
@@ -455,6 +504,7 @@ class DesktopServiceController:
             "last_price": last_price,
             "price_display": self.format_price(last_price, currency, inst_obj.market.value if inst_obj else "NSE"),
             "signal": ui_signal,
+            "action": ui_signal,
             "confidence_pct": conf_pct,
             "horizon": horizon,
             "horizon_label": self._format_horizon_label(horizon),
@@ -470,11 +520,106 @@ class DesktopServiceController:
             "quality_gate": (decision.evidence or {}).get("data_quality_gate", {}),
             "hierarchical_model_tier": (decision.evidence or {}).get("hierarchical_model_tier", "EXCHANGE_SPECIFIC"),
             "latencies": dict(self._latest_latencies),
+            "session_timing": timing_info,
             "notification": notification,
         }
 
     def record_ui_render_latency(self, ui_ms: float) -> None:
         self._latest_latencies["ui_update_latency_ms"] = round(max(0.05, float(ui_ms)), 2)
+
+    @staticmethod
+    def get_market_session_status(market: str = "NSE") -> dict[str, Any]:
+        """Compute exact market session state and countdown to next open or close."""
+        mkt_up = (market or "NSE").upper()
+        if mkt_up in ("CRYPTO", "QUOTEX"):
+            return {
+                "is_open": True,
+                "is_pre_market": False,
+                "badge": "LIVE",
+                "message": "Continuous 24/7 Market Session",
+                "countdown_str": "24/7 Active",
+            }
+
+        try:
+            ist_tz = ZoneInfo("Asia/Kolkata")
+        except Exception:
+            ist_tz = timezone.utc
+
+        now_ist = datetime.now(ist_tz)
+        weekday = now_ist.weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
+        t = now_ist.time()
+        pre_open_t = dtime(9, 0)
+        open_t = dtime(9, 15)
+        close_t = dtime(15, 30)
+        post_open_t = dtime(15, 40)
+        post_close_t = dtime(16, 0)
+
+        if weekday < 5 and open_t <= t <= close_t:
+            close_dt = datetime.combine(now_ist.date(), close_t, tzinfo=ist_tz)
+            rem = close_dt - now_ist
+            hrs, rem_sec = divmod(max(0, int(rem.total_seconds())), 3600)
+            mins = rem_sec // 60
+            return {
+                "is_open": True,
+                "is_pre_market": False,
+                "badge": "LIVE",
+                "message": "Continuous Trading Session (09:15 - 15:30 IST)",
+                "countdown_str": f"Closes in {hrs}h {mins:02d}m",
+            }
+
+        if weekday < 5 and pre_open_t <= t < open_t:
+            live_open_dt = datetime.combine(now_ist.date(), open_t, tzinfo=ist_tz)
+            rem = live_open_dt - now_ist
+            mins = max(0, int(rem.total_seconds())) // 60
+            return {
+                "is_open": False,
+                "is_pre_market": True,
+                "badge": "PRE-MARKET",
+                "message": "Pre-Market Discovery Session (09:00 - 09:15 IST)",
+                "countdown_str": f"Live opens in {mins:02d}m",
+            }
+
+        if weekday < 5 and post_open_t <= t <= post_close_t:
+            return {
+                "is_open": False,
+                "is_pre_market": False,
+                "badge": "POST-MARKET",
+                "message": "Post-Market Closing Session (15:40 - 16:00 IST)",
+                "countdown_str": "Session finalization",
+            }
+
+        # Calculate next market open
+        if weekday < 4 and t > close_t:
+            next_date = now_ist.date() + timedelta(days=1)
+        elif weekday == 4 and t > close_t:
+            next_date = now_ist.date() + timedelta(days=3)
+        elif weekday == 5:
+            next_date = now_ist.date() + timedelta(days=2)
+        elif weekday == 6:
+            next_date = now_ist.date() + timedelta(days=1)
+        elif weekday < 5 and t < open_t:
+            next_date = now_ist.date()
+        else:
+            next_date = now_ist.date() + timedelta(days=1)
+
+        next_open_dt = datetime.combine(next_date, open_t, tzinfo=ist_tz)
+        rem = next_open_dt - now_ist
+        hrs, rem_sec = divmod(max(0, int(rem.total_seconds())), 3600)
+        mins = rem_sec // 60
+
+        day_label = (
+            "Tomorrow"
+            if next_date == (now_ist.date() + timedelta(days=1))
+            else ("Today" if next_date == now_ist.date() else next_date.strftime("%A"))
+        )
+
+        return {
+            "is_open": False,
+            "is_pre_market": False,
+            "badge": "MARKET CLOSED",
+            "message": f"Regular Trading Session Closed - Opens {day_label} 09:15 IST",
+            "countdown_str": f"Opens in {hrs}h {mins:02d}m ({day_label})",
+        }
 
     @staticmethod
     def format_price(price: float, currency: str = "INR", market: str = "NSE") -> str:
@@ -767,6 +912,7 @@ class DesktopServiceController:
                         "price": 0.0,
                         "price_display": "QUOTEX DATA UNAVAILABLE",
                         "signal": "NO-TRADE",
+                "action": "NO-TRADE",
                         "confidence_pct": 0,
                         "horizon": horizon,
                         "entry_price": 0.0,
@@ -861,13 +1007,170 @@ class DesktopServiceController:
         ledger_metrics = ledger.get_metrics()
         summary = UniverseService.summary()
         learning_telemetry = self.get_continuous_learning_status()
+
+        try:
+            from paper_trading.worker import PaperTradingWorker
+            from paper_trading.evaluator import PaperTradingEvaluator
+            op_status = PaperTradingWorker.get_operational_status()
+            p_eval = PaperTradingEvaluator()
+            eval_res = p_eval.evaluate()
+            paper_status = {
+                "active_mode": "PAPER_TRADING (SIMULATED - REAL TRADING DISABLED)",
+                "worker_state": op_status["worker_state"],
+                "process_ownership": op_status["process_ownership"],
+                "uptime_seconds": op_status["uptime_seconds"],
+                "last_successful_cycle": op_status["last_successful_cycle"],
+                "last_heartbeat": op_status["last_heartbeat"],
+                "metrics": op_status["store_metrics"],
+                "evidence_status": eval_res.get("evidence_status", "INSUFFICIENT_PROSPECTIVE_EVIDENCE"),
+                "sample_progress": eval_res.get("sample_progress", {}),
+                "is_eligible_to_generate": op_status["is_currently_eligible_to_generate"],
+                "provider_status": op_status["provider_status"],
+            }
+        except Exception as exc:
+            paper_status = {
+                "active_mode": "PAPER_TRADING (SIMULATED - REAL TRADING DISABLED)",
+                "worker_state": "STOPPED",
+                "evidence_status": "INSUFFICIENT_PROSPECTIVE_EVIDENCE",
+                "metrics": {},
+                "sample_progress": {},
+                "error": str(exc),
+            }
+
+        import os
+        import threading
+        cache_file = Path("data/universe/equity_candles_cache.json")
+        cache_size = cache_file.stat().st_size if cache_file.exists() else 0
+        cache_keys = 0
+        if cache_file.exists():
+            try:
+                import json
+                cache_keys = len(json.loads(cache_file.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+
+        system_resources = {
+            "pid": os.getpid(),
+            "active_threads": threading.active_count(),
+            "equity_cache_file": str(cache_file),
+            "equity_cache_bytes": cache_size,
+            "equity_cached_instruments": cache_keys,
+            "predictions_paused": self.predictions_paused,
+            "governance_mode": "CONTROLLED (AUTO-PROMOTE DISABLED)",
+        }
+
+        # Section 8 Candidate Model Accuracy & Dual-Mode Telemetry
+        model_accuracy_telemetry = {
+            "has_candidate_audit": False,
+            "acceptance_state": "NO_EVALUATION",
+            "unconstrained_accuracy_pct": None,
+            "wilson_ci_lower_pct": None,
+            "wilson_ci_upper_pct": None,
+            "unconstrained_brier_score": None,
+            "high_conviction_win_rate_pct": None,
+            "high_conviction_expectancy_pct": None,
+            "high_conviction_coverage_pct": None,
+        }
+        try:
+            cand_store = Path("models_store") / "lgbm_multiclass_candidate"
+            if cand_store.exists():
+                v_dirs = sorted([d for d in cand_store.iterdir() if d.is_dir()])
+                if v_dirs:
+                    latest_v = v_dirs[-1]
+                    audit_f = latest_v / "accuracy_evaluation_report.json"
+                    if audit_f.exists():
+                        import json
+                        aud = json.loads(audit_f.read_text(encoding="utf-8"))
+                        model_accuracy_telemetry["has_candidate_audit"] = True
+                        model_accuracy_telemetry["candidate_version"] = latest_v.name
+                        model_accuracy_telemetry["acceptance_state"] = aud.get("acceptance_state", "UNKNOWN")
+                        model_accuracy_telemetry["unconstrained_accuracy_pct"] = aud.get("overall_accuracy_pct")
+                        model_accuracy_telemetry["wilson_ci_lower_pct"] = aud.get("wilson_ci_lower_pct")
+                        model_accuracy_telemetry["wilson_ci_upper_pct"] = aud.get("wilson_ci_upper_pct")
+                        model_accuracy_telemetry["unconstrained_brier_score"] = aud.get("brier_score")
+                        model_accuracy_telemetry["high_conviction_win_rate_pct"] = aud.get("active_trade_win_rate_pct")
+                        model_accuracy_telemetry["high_conviction_expectancy_pct"] = aud.get("active_trade_expectancy_pct")
+                        model_accuracy_telemetry["high_conviction_coverage_pct"] = aud.get("coverage_rate_pct")
+        except Exception:
+            pass
+
         return {
             "startup": self._startup_result,
             "latencies": dict(self._latest_latencies),
             "universe_summary": summary,
             "ledger_metrics": ledger_metrics,
             "continuous_learning": learning_telemetry,
+            "paper_trading": paper_status,
+            "system_resources": system_resources,
+            "model_accuracy": model_accuracy_telemetry,
             "current_eval": current_eval or {},
             "logs": self.get_recent_logs()[-80:],
         }
+
+    def get_recent_prediction_outcomes(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the most recent resolved predictions from the prediction outcomes ledger."""
+        try:
+            from learning.ledger import PredictionLedgerService
+
+            ledger = PredictionLedgerService.get_instance()
+            records: list[dict[str, Any]] = []
+            with ledger._ledger_lock:
+                if ledger._resolved_outcomes:
+                    records = list(ledger._resolved_outcomes[-limit:])
+                elif ledger.ledger_file.exists():
+                    import json
+
+                    with open(ledger.ledger_file, "r", encoding="utf-8") as f:
+                        lines = [line.strip() for line in f if line.strip()]
+                        for line in lines[-limit:]:
+                            try:
+                                records.append(json.loads(line))
+                            except Exception:
+                                pass
+
+            formatted: list[dict[str, Any]] = []
+            for r in reversed(records):
+                dt_str = r.get("resolved_at") or r.get("predicted_at") or ""
+                if "T" in dt_str:
+                    time_part = dt_str.split("T")[1][:8]
+                    date_part = dt_str.split("T")[0]
+                    formatted_time = f"{date_part} {time_part}"
+                else:
+                    formatted_time = dt_str[:19]
+
+                net_ret = r.get("net_trade_return_pct")
+                if net_ret is None:
+                    net_ret = r.get("actual_return_pct", 0.0)
+
+                formatted.append(
+                    {
+                        "time": formatted_time,
+                        "symbol": r.get("canonical_symbol") or r.get("symbol", "—"),
+                        "action": r.get("action", "—"),
+                        "entry_price": r.get("entry_price", 0.0),
+                        "exit_price": r.get("exit_price", 0.0),
+                        "outcome": r.get("outcome", "PENDING"),
+                        "return_pct": round(float(net_ret), 2) if net_ret is not None else 0.0,
+                        "confidence": round(float(r.get("confidence", 0.0)) * 100, 1),
+                    }
+                )
+            return formatted
+        except Exception as exc:
+            self.log_event(f"Error fetching recent prediction outcomes: {exc}")
+            return []
+
+    def stop_background_services(self) -> None:
+        """Stop background learning controller and outcome resolver workers cleanly."""
+        try:
+            from learning.ledger import PredictionLedgerService
+
+            PredictionLedgerService.get_instance().stop_background_resolver()
+        except Exception as exc:
+            self.log_event(f"Outcome resolver shutdown warning: {exc}")
+        try:
+            from learning.controller import ContinuousLearningController
+
+            ContinuousLearningController.get_instance().stop_background_loop()
+        except Exception as exc:
+            self.log_event(f"Learning controller shutdown warning: {exc}")
 

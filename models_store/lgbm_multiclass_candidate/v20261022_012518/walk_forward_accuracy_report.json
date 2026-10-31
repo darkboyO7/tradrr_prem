@@ -1,0 +1,481 @@
+{
+  "model_id": "lgbm_multiclass_candidate",
+  "n_folds": 4,
+  "total_oos_samples": 1064,
+  "folds": [
+    {
+      "fold_index": 1,
+      "train_bars": 1066,
+      "oos_bars": 266,
+      "embargo_bars": 3,
+      "train_start_idx": 0,
+      "train_end_idx": 1066,
+      "oos_start_idx": 1069,
+      "oos_end_idx": 1335,
+      "eval_report": {
+        "model_id": "lgbm_multiclass_candidate_fold1",
+        "version": "fold_1",
+        "evaluated_at": "2026-10-22T01:25:18.374502+00:00",
+        "target_description": "Walk-Forward Fold 1 Target Return",
+        "forecast_horizon": "15m",
+        "sample_size": 266,
+        "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+        "overall_accuracy": 0.282,
+        "overall_accuracy_pct": 28.2,
+        "wilson_ci_lower_95": 0.2313,
+        "wilson_ci_upper_95": 0.3388,
+        "wilson_ci_lower_pct": 23.13,
+        "wilson_ci_upper_pct": 33.88,
+        "target_accuracy_hurdle": 0.95,
+        "confusion_matrix": [
+          [
+            55,
+            1,
+            20
+          ],
+          [
+            124,
+            3,
+            10
+          ],
+          [
+            33,
+            3,
+            17
+          ]
+        ],
+        "per_class_metrics": {
+          "SELL": {
+            "class_id": 0,
+            "class_name": "SELL",
+            "support": 76,
+            "true_positives": 55,
+            "false_positives": 157,
+            "false_negatives": 21,
+            "precision": 0.2594,
+            "recall": 0.7237,
+            "f1_score": 0.3819
+          },
+          "NEUTRAL": {
+            "class_id": 1,
+            "class_name": "NEUTRAL",
+            "support": 137,
+            "true_positives": 3,
+            "false_positives": 4,
+            "false_negatives": 134,
+            "precision": 0.4286,
+            "recall": 0.0219,
+            "f1_score": 0.0417
+          },
+          "BUY": {
+            "class_id": 2,
+            "class_name": "BUY",
+            "support": 53,
+            "true_positives": 17,
+            "false_positives": 30,
+            "false_negatives": 36,
+            "precision": 0.3617,
+            "recall": 0.3208,
+            "f1_score": 0.34
+          }
+        },
+        "class_distribution": {
+          "SELL": 76,
+          "NEUTRAL": 137,
+          "BUY": 53
+        },
+        "brier_score": 0.756,
+        "expected_calibration_error": 0.2099,
+        "coverage_rate_pct": 97.37,
+        "abstention_rate_pct": 2.63,
+        "active_sample_count": 259,
+        "active_trade_accuracy_pct": 27.8,
+        "active_trade_win_rate_pct": 48.65,
+        "active_trade_expectancy_pct": -0.0111,
+        "leakage_checks_passed": true,
+        "leakage_audit_log": [],
+        "rejection_reasons": [
+          "Measured accuracy is 28.20% (Wilson 95% CI Lower Bound: 23.13%), which is below the mandatory 95.0% acceptance gate."
+        ]
+      }
+    },
+    {
+      "fold_index": 2,
+      "train_bars": 1332,
+      "oos_bars": 266,
+      "embargo_bars": 3,
+      "train_start_idx": 0,
+      "train_end_idx": 1332,
+      "oos_start_idx": 1335,
+      "oos_end_idx": 1601,
+      "eval_report": {
+        "model_id": "lgbm_multiclass_candidate_fold2",
+        "version": "fold_2",
+        "evaluated_at": "2026-10-22T01:25:18.397836+00:00",
+        "target_description": "Walk-Forward Fold 2 Target Return",
+        "forecast_horizon": "15m",
+        "sample_size": 266,
+        "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+        "overall_accuracy": 0.4211,
+        "overall_accuracy_pct": 42.11,
+        "wilson_ci_lower_95": 0.3633,
+        "wilson_ci_upper_95": 0.4811,
+        "wilson_ci_lower_pct": 36.33,
+        "wilson_ci_upper_pct": 48.11,
+        "target_accuracy_hurdle": 0.95,
+        "confusion_matrix": [
+          [
+            24,
+            16,
+            13
+          ],
+          [
+            75,
+            80,
+            19
+          ],
+          [
+            16,
+            15,
+            8
+          ]
+        ],
+        "per_class_metrics": {
+          "SELL": {
+            "class_id": 0,
+            "class_name": "SELL",
+            "support": 53,
+            "true_positives": 24,
+            "false_positives": 91,
+            "false_negatives": 29,
+            "precision": 0.2087,
+            "recall": 0.4528,
+            "f1_score": 0.2857
+          },
+          "NEUTRAL": {
+            "class_id": 1,
+            "class_name": "NEUTRAL",
+            "support": 174,
+            "true_positives": 80,
+            "false_positives": 31,
+            "false_negatives": 94,
+            "precision": 0.7207,
+            "recall": 0.4598,
+            "f1_score": 0.5614
+          },
+          "BUY": {
+            "class_id": 2,
+            "class_name": "BUY",
+            "support": 39,
+            "true_positives": 8,
+            "false_positives": 32,
+            "false_negatives": 31,
+            "precision": 0.2,
+            "recall": 0.2051,
+            "f1_score": 0.2025
+          }
+        },
+        "class_distribution": {
+          "SELL": 53,
+          "NEUTRAL": 174,
+          "BUY": 39
+        },
+        "brier_score": 0.6254,
+        "expected_calibration_error": 0.1646,
+        "coverage_rate_pct": 58.27,
+        "abstention_rate_pct": 41.73,
+        "active_sample_count": 155,
+        "active_trade_accuracy_pct": 20.65,
+        "active_trade_win_rate_pct": 45.16,
+        "active_trade_expectancy_pct": 0.0892,
+        "leakage_checks_passed": true,
+        "leakage_audit_log": [],
+        "rejection_reasons": [
+          "Measured accuracy is 42.11% (Wilson 95% CI Lower Bound: 36.33%), which is below the mandatory 95.0% acceptance gate."
+        ]
+      }
+    },
+    {
+      "fold_index": 3,
+      "train_bars": 1598,
+      "oos_bars": 266,
+      "embargo_bars": 3,
+      "train_start_idx": 0,
+      "train_end_idx": 1598,
+      "oos_start_idx": 1601,
+      "oos_end_idx": 1867,
+      "eval_report": {
+        "model_id": "lgbm_multiclass_candidate_fold3",
+        "version": "fold_3",
+        "evaluated_at": "2026-10-22T01:25:18.422322+00:00",
+        "target_description": "Walk-Forward Fold 3 Target Return",
+        "forecast_horizon": "15m",
+        "sample_size": 266,
+        "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+        "overall_accuracy": 0.4323,
+        "overall_accuracy_pct": 43.23,
+        "wilson_ci_lower_95": 0.3742,
+        "wilson_ci_upper_95": 0.4924,
+        "wilson_ci_lower_pct": 37.42,
+        "wilson_ci_upper_pct": 49.24,
+        "target_accuracy_hurdle": 0.95,
+        "confusion_matrix": [
+          [
+            55,
+            30,
+            17
+          ],
+          [
+            42,
+            46,
+            10
+          ],
+          [
+            24,
+            28,
+            14
+          ]
+        ],
+        "per_class_metrics": {
+          "SELL": {
+            "class_id": 0,
+            "class_name": "SELL",
+            "support": 102,
+            "true_positives": 55,
+            "false_positives": 66,
+            "false_negatives": 47,
+            "precision": 0.4545,
+            "recall": 0.5392,
+            "f1_score": 0.4933
+          },
+          "NEUTRAL": {
+            "class_id": 1,
+            "class_name": "NEUTRAL",
+            "support": 98,
+            "true_positives": 46,
+            "false_positives": 58,
+            "false_negatives": 52,
+            "precision": 0.4423,
+            "recall": 0.4694,
+            "f1_score": 0.4554
+          },
+          "BUY": {
+            "class_id": 2,
+            "class_name": "BUY",
+            "support": 66,
+            "true_positives": 14,
+            "false_positives": 27,
+            "false_negatives": 52,
+            "precision": 0.3415,
+            "recall": 0.2121,
+            "f1_score": 0.2617
+          }
+        },
+        "class_distribution": {
+          "SELL": 102,
+          "NEUTRAL": 98,
+          "BUY": 66
+        },
+        "brier_score": 0.6377,
+        "expected_calibration_error": 0.0596,
+        "coverage_rate_pct": 60.9,
+        "abstention_rate_pct": 39.1,
+        "active_sample_count": 162,
+        "active_trade_accuracy_pct": 42.59,
+        "active_trade_win_rate_pct": 58.02,
+        "active_trade_expectancy_pct": 0.067,
+        "leakage_checks_passed": true,
+        "leakage_audit_log": [],
+        "rejection_reasons": [
+          "Measured accuracy is 43.23% (Wilson 95% CI Lower Bound: 37.42%), which is below the mandatory 95.0% acceptance gate."
+        ]
+      }
+    },
+    {
+      "fold_index": 4,
+      "train_bars": 1864,
+      "oos_bars": 266,
+      "embargo_bars": 3,
+      "train_start_idx": 0,
+      "train_end_idx": 1864,
+      "oos_start_idx": 1867,
+      "oos_end_idx": 2133,
+      "eval_report": {
+        "model_id": "lgbm_multiclass_candidate_fold4",
+        "version": "fold_4",
+        "evaluated_at": "2026-10-22T01:25:18.448771+00:00",
+        "target_description": "Walk-Forward Fold 4 Target Return",
+        "forecast_horizon": "15m",
+        "sample_size": 266,
+        "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+        "overall_accuracy": 0.4023,
+        "overall_accuracy_pct": 40.23,
+        "wilson_ci_lower_95": 0.3451,
+        "wilson_ci_upper_95": 0.4622,
+        "wilson_ci_lower_pct": 34.51,
+        "wilson_ci_upper_pct": 46.22,
+        "target_accuracy_hurdle": 0.95,
+        "confusion_matrix": [
+          [
+            81,
+            19,
+            19
+          ],
+          [
+            45,
+            15,
+            15
+          ],
+          [
+            47,
+            14,
+            11
+          ]
+        ],
+        "per_class_metrics": {
+          "SELL": {
+            "class_id": 0,
+            "class_name": "SELL",
+            "support": 119,
+            "true_positives": 81,
+            "false_positives": 92,
+            "false_negatives": 38,
+            "precision": 0.4682,
+            "recall": 0.6807,
+            "f1_score": 0.5548
+          },
+          "NEUTRAL": {
+            "class_id": 1,
+            "class_name": "NEUTRAL",
+            "support": 75,
+            "true_positives": 15,
+            "false_positives": 33,
+            "false_negatives": 60,
+            "precision": 0.3125,
+            "recall": 0.2,
+            "f1_score": 0.2439
+          },
+          "BUY": {
+            "class_id": 2,
+            "class_name": "BUY",
+            "support": 72,
+            "true_positives": 11,
+            "false_positives": 34,
+            "false_negatives": 61,
+            "precision": 0.2444,
+            "recall": 0.1528,
+            "f1_score": 0.188
+          }
+        },
+        "class_distribution": {
+          "SELL": 119,
+          "NEUTRAL": 75,
+          "BUY": 72
+        },
+        "brier_score": 0.6435,
+        "expected_calibration_error": 0.0424,
+        "coverage_rate_pct": 81.95,
+        "abstention_rate_pct": 18.05,
+        "active_sample_count": 218,
+        "active_trade_accuracy_pct": 42.2,
+        "active_trade_win_rate_pct": 55.05,
+        "active_trade_expectancy_pct": 0.0705,
+        "leakage_checks_passed": true,
+        "leakage_audit_log": [],
+        "rejection_reasons": [
+          "Measured accuracy is 40.23% (Wilson 95% CI Lower Bound: 34.51%), which is below the mandatory 95.0% acceptance gate."
+        ]
+      }
+    }
+  ],
+  "aggregate_report": {
+    "model_id": "lgbm_multiclass_candidate",
+    "version": "aggregate_walk_forward",
+    "evaluated_at": "2026-10-22T01:25:18.450171+00:00",
+    "target_description": "Aggregate Walk-Forward Out-of-Sample Telemetry",
+    "forecast_horizon": "15m",
+    "sample_size": 1064,
+    "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+    "overall_accuracy": 0.3844,
+    "overall_accuracy_pct": 38.44,
+    "wilson_ci_lower_95": 0.3556,
+    "wilson_ci_upper_95": 0.414,
+    "wilson_ci_lower_pct": 35.56,
+    "wilson_ci_upper_pct": 41.4,
+    "target_accuracy_hurdle": 0.95,
+    "confusion_matrix": [
+      [
+        215,
+        66,
+        69
+      ],
+      [
+        286,
+        144,
+        54
+      ],
+      [
+        120,
+        60,
+        50
+      ]
+    ],
+    "per_class_metrics": {
+      "SELL": {
+        "class_id": 0,
+        "class_name": "SELL",
+        "support": 350,
+        "true_positives": 215,
+        "false_positives": 406,
+        "false_negatives": 135,
+        "precision": 0.3462,
+        "recall": 0.6143,
+        "f1_score": 0.4428
+      },
+      "NEUTRAL": {
+        "class_id": 1,
+        "class_name": "NEUTRAL",
+        "support": 484,
+        "true_positives": 144,
+        "false_positives": 126,
+        "false_negatives": 340,
+        "precision": 0.5333,
+        "recall": 0.2975,
+        "f1_score": 0.382
+      },
+      "BUY": {
+        "class_id": 2,
+        "class_name": "BUY",
+        "support": 230,
+        "true_positives": 50,
+        "false_positives": 123,
+        "false_negatives": 180,
+        "precision": 0.289,
+        "recall": 0.2174,
+        "f1_score": 0.2481
+      }
+    },
+    "class_distribution": {
+      "SELL": 350,
+      "NEUTRAL": 484,
+      "BUY": 230
+    },
+    "brier_score": 0.6656,
+    "expected_calibration_error": 0.0737,
+    "coverage_rate_pct": 74.62,
+    "abstention_rate_pct": 25.38,
+    "active_sample_count": 794,
+    "active_trade_accuracy_pct": 33.38,
+    "active_trade_win_rate_pct": 51.64,
+    "active_trade_expectancy_pct": 0.0468,
+    "leakage_checks_passed": true,
+    "leakage_audit_log": [],
+    "rejection_reasons": [
+      "Measured accuracy is 38.44% (Wilson 95% CI Lower Bound: 35.56%), which is below the mandatory 95.0% acceptance gate."
+    ]
+  },
+  "mean_fold_accuracy_pct": 38.44,
+  "std_fold_accuracy_pct": 6.01,
+  "mean_fold_win_rate_pct": 51.72,
+  "mean_fold_expectancy_pct": 0.0539
+}

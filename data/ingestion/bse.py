@@ -15,7 +15,7 @@ from core.instrument import MarketType
 from core.logging import get_logger
 from core.symbol_resolver import SymbolResolver
 from data.ingestion.base import MarketDataProvider
-from data.ingestion.nse import _get_http_client
+from data.ingestion.nse import _get_http_client, _load_equity_cache, _save_equity_cache
 
 logger = get_logger(__name__)
 
@@ -104,18 +104,26 @@ class BSEDataProvider(MarketDataProvider):
         self.touch_event()
 
     def fetch_live_quote_sync(self, symbol: str, timeout: float = 6.0) -> RawMarketEvent | None:
-        """Fetch real-time BSE quote via TradingView India Scanner or Groww BSE feed."""
+        """Fetch real-time BSE quote via TradingView India Scanner or Groww BSE feed.
+        
+        Strictly queries BSE endpoints and never substitutes NSE quotes or liquidity.
+        """
         bse_query = symbol if ":" in symbol else f"BSE:{symbol.strip().upper()}"
         resolved = SymbolResolver.resolve(bse_query) or SymbolResolver.resolve(symbol)
         clean_sym = resolved.symbol if resolved else symbol.replace("BSE:", "").strip().upper()
-        ticker = f"BSE:{clean_sym}"
+        scrip_code = ""
+        if resolved:
+            scrip_code = str(resolved.metadata.get("scrip_code") or resolved.metadata.get("bse_scrip_code") or "")
+        tickers = [f"BSE:{clean_sym}"]
+        if scrip_code and scrip_code != clean_sym:
+            tickers.append(f"BSE:{scrip_code}")
         client = _get_http_client()
 
         try:
             resp = client.post(
                 "https://scanner.tradingview.com/india/scan",
                 json={
-                    "symbols": {"tickers": [ticker, f"NSE:{clean_sym}"]},
+                    "symbols": {"tickers": tickers},
                     "columns": ["close", "open", "high", "low", "volume", "change", "ATR"],
                 },
                 timeout=timeout,
@@ -123,44 +131,48 @@ class BSEDataProvider(MarketDataProvider):
             if resp.status_code == 200:
                 data = resp.json()
                 rows = data.get("data", [])
-                if rows and rows[0].get("d"):
-                    d = rows[0]["d"]
-                    price = float(d[0]) if d[0] is not None else 0.0
-                    if price > 0:
-                        open_p = float(d[1]) if d[1] is not None else price
-                        high_p = float(d[2]) if d[2] is not None else price
-                        low_p = float(d[3]) if d[3] is not None else price
-                        vol = float(d[4]) if d[4] is not None else 0.0
-                        atr_val = float(d[6]) if len(d) > 6 and d[6] is not None else 0.0
-                        tick = resolved.tick_size if resolved else 0.05
-                        half_spread = max(tick, round(price * 0.0001, 2))
-                        now_dt = datetime.now(UTC)
-                        raw_event = RawMarketEvent(
-                            provider=self.name,
-                            symbol=clean_sym,
-                            channel="quote",
-                            received_at=now_dt,
-                            raw_payload={
-                                "type": "quote",
-                                "exchange": "BSE",
-                                "symbol": clean_sym,
-                                "price": price,
-                                "open": open_p,
-                                "high": high_p,
-                                "low": low_p,
-                                "volume": vol,
-                                "atr": atr_val,
-                                "bid": round(price - half_spread, 2),
-                                "ask": round(price + half_spread, 2),
-                                "bid_qty": 200,
-                                "ask_qty": 200,
-                                "timestamp": now_dt.timestamp(),
-                                "source": "TRADINGVIEW_BSE_LIVE",
-                            },
-                        )
-                        self._raw_queue.append(raw_event)
-                        self.touch_event()
-                        return raw_event
+                for row in rows:
+                    row_sym = str(row.get("s", ""))
+                    if not row_sym.startswith("BSE:"):
+                        continue
+                    if row.get("d"):
+                        d = row["d"]
+                        price = float(d[0]) if d[0] is not None else 0.0
+                        if price > 0:
+                            open_p = float(d[1]) if d[1] is not None else price
+                            high_p = float(d[2]) if d[2] is not None else price
+                            low_p = float(d[3]) if d[3] is not None else price
+                            vol = float(d[4]) if d[4] is not None else 0.0
+                            atr_val = float(d[6]) if len(d) > 6 and d[6] is not None else 0.0
+                            tick = resolved.tick_size if resolved else 0.05
+                            half_spread = max(tick, round(price * 0.0001, 2))
+                            now_dt = datetime.now(UTC)
+                            raw_event = RawMarketEvent(
+                                provider=self.name,
+                                symbol=clean_sym,
+                                channel="quote",
+                                received_at=now_dt,
+                                raw_payload={
+                                    "type": "quote",
+                                    "exchange": "BSE",
+                                    "symbol": clean_sym,
+                                    "price": price,
+                                    "open": open_p,
+                                    "high": high_p,
+                                    "low": low_p,
+                                    "volume": vol,
+                                    "atr": atr_val,
+                                    "bid": round(price - half_spread, 2),
+                                    "ask": round(price + half_spread, 2),
+                                    "bid_qty": 200,
+                                    "ask_qty": 200,
+                                    "timestamp": now_dt.timestamp(),
+                                    "source": "TRADINGVIEW_BSE_LIVE",
+                                },
+                            )
+                            self._raw_queue.append(raw_event)
+                            self.touch_event()
+                            return raw_event
         except Exception as exc:
             logger.debug("TradingView BSE live quote fallback triggered", symbol=clean_sym, error=str(exc))
 
@@ -228,6 +240,9 @@ class BSEDataProvider(MarketDataProvider):
             specs_to_try.append(("1y", 1440))
 
         candles: list[Candle] = []
+        now_utc = datetime.now(UTC)
+        tf_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 300)
+
         for range_str, interval_min in specs_to_try:
             candidate_urls = []
             if scrip_code:
@@ -235,8 +250,9 @@ class BSEDataProvider(MarketDataProvider):
                     f"https://groww.in/v1/api/charting_service/v2/chart/exchange/BSE/segment/CASH/"
                     f"{urllib.parse.quote(scrip_code)}/{range_str}?intervalInMinutes={interval_min}"
                 )
+            # Use BSE exchange segment with clean symbol (never fall back to NSE)
             candidate_urls.append(
-                f"https://groww.in/v1/api/charting_service/v2/chart/exchange/NSE/segment/CASH/"
+                f"https://groww.in/v1/api/charting_service/v2/chart/exchange/BSE/segment/CASH/"
                 f"{urllib.parse.quote(clean_sym)}/{range_str}?intervalInMinutes={interval_min}"
             )
 
@@ -256,6 +272,7 @@ class BSEDataProvider(MarketDataProvider):
                                 c_p = float(row[4])
                                 vol = float(row[5]) if len(row) > 5 and row[5] is not None else 0.0
                                 if o_p > 0 and c_p > 0:
+                                    is_closed = now_utc.timestamp() >= (ts.timestamp() + tf_seconds)
                                     batch.append(
                                         Candle(
                                             symbol=clean_sym,
@@ -266,15 +283,30 @@ class BSEDataProvider(MarketDataProvider):
                                             low=min(o_p, l_p, c_p),
                                             close=c_p,
                                             volume=max(0.0, vol),
+                                            is_closed=is_closed,
+                                            source_provider="GROWW_BSE",
+                                            source_interval=timeframe,
+                                            retrieved_at=now_utc,
                                         )
                                     )
                         if len(batch) >= 20:
                             self.touch_event()
+                            _save_equity_cache(f"BSE:{clean_sym}:{timeframe}", batch)
                             return batch
                         elif len(batch) > len(candles):
                             candles = batch
                 except Exception as exc:
                     logger.debug("BSE candle fetch attempt failed", url=url, error=str(exc))
+
+        if candles:
+            self.touch_event()
+            _save_equity_cache(f"BSE:{clean_sym}:{timeframe}", candles)
+            return candles
+
+        cached = _load_equity_cache(f"BSE:{clean_sym}:{timeframe}")
+        if cached:
+            self.touch_event()
+            return cached[-limit:]
 
         return candles
 

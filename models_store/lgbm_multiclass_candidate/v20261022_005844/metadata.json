@@ -1,0 +1,44 @@
+{
+  "model_id": "lgbm_multiclass_candidate",
+  "version": "v20261022_005844",
+  "created_at": "2026-10-22T00:58:44.404881+00:00",
+  "is_production_ready": false,
+  "multiclass_classes": [
+    0,
+    1,
+    2
+  ],
+  "class_names": [
+    "SELL",
+    "NEUTRAL",
+    "BUY"
+  ],
+  "is_fully_supported": true,
+  "alpha_dirichlet_smoothing": 0.15,
+  "feature_names": [
+    "return_1",
+    "log_return_5",
+    "candle_range_pct",
+    "candle_body_ratio",
+    "rsi_14",
+    "macd_hist",
+    "adx_14",
+    "atr_14",
+    "rvol_20",
+    "volatility_regime"
+  ],
+  "model_sha256": "c4601a21940dace393ef7985cc0c7e1a3e06a2bcfd98a904594ff6f8e2c85a4e",
+  "train_samples": 497,
+  "oos_samples": 211,
+  "oos_metrics": {
+    "accuracy_pct": 54.98,
+    "wilson_ci_lower_pct": 48.23,
+    "wilson_ci_upper_pct": 61.54,
+    "acceptance_state": "ACCURACY_TARGET_NOT_MET",
+    "multiclass_brier_score": 0.6173,
+    "expected_calibration_error": 0.105,
+    "active_win_rate_pct": 63.03,
+    "active_expectancy_pct": 0.3192
+  },
+  "governance_note": "Model evaluated under Section 8 Institutional Accuracy & Evaluation Standard. Acceptance State: ACCURACY_TARGET_NOT_MET."
+}

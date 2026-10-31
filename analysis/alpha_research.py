@@ -260,7 +260,7 @@ class AlphaResearchPipeline:
         lag5_corrs = []
         for sym in f_aligned.columns:
             s = f_aligned[sym].dropna()
-            if len(s) > 10:
+            if len(s) > 10 and float(s.std()) > 1e-9:
                 ac1 = s.autocorr(1)
                 ac5 = s.autocorr(5)
                 if not np.isnan(ac1):

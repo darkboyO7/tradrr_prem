@@ -4,9 +4,12 @@ Institutional market data adapter for Indian equities with market session tracki
 IST timezone alignment, tick validation, and historical candle retrieval.
 """
 
+import json
+import os
 import urllib.parse
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, time
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -34,6 +37,75 @@ def _get_http_client() -> httpx.Client:
             },
         )
     return _SHARED_HTTP_CLIENT
+
+
+_EQUITY_CACHE_FILE = Path(__file__).resolve().parent.parent / "universe" / "equity_candles_cache.json"
+
+
+def _load_equity_cache(key: str) -> list[Candle]:
+    """Load cached historical candles for offline and fast recovery."""
+    try:
+        if not _EQUITY_CACHE_FILE.exists():
+            return []
+        data = json.loads(_EQUITY_CACHE_FILE.read_text(encoding="utf-8"))
+        records = data.get(key, [])
+        candles = []
+        now_utc = datetime.now(UTC)
+        for r in records:
+            ts = datetime.fromisoformat(r["timestamp"])
+            candles.append(
+                Candle(
+                    symbol=r["symbol"],
+                    timeframe=r["timeframe"],
+                    timestamp=ts,
+                    open=float(r["open"]),
+                    high=float(r["high"]),
+                    low=float(r["low"]),
+                    close=float(r["close"]),
+                    volume=float(r.get("volume", 0.0)),
+                    is_closed=True,
+                    source_provider=r.get("source_provider", "CACHE_NSE"),
+                    source_interval=r["timeframe"],
+                    retrieved_at=now_utc,
+                )
+            )
+        return candles
+    except Exception as exc:
+        logger.debug("NSE equity cache load failed", key=key, error=str(exc))
+        return []
+
+
+def _save_equity_cache(key: str, candles: list[Candle]) -> None:
+    """Save authentic fetched candles to local persistent equity cache."""
+    if not candles or os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    try:
+        data: dict[str, Any] = {}
+        if _EQUITY_CACHE_FILE.exists():
+            try:
+                data = json.loads(_EQUITY_CACHE_FILE.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+        records = []
+        for c in candles[-180:]:
+            records.append({
+                "symbol": c.symbol,
+                "timeframe": c.timeframe,
+                "timestamp": c.timestamp.isoformat(),
+                "open": c.open,
+                "high": c.high,
+                "low": c.low,
+                "close": c.close,
+                "volume": c.volume,
+                "source_provider": c.source_provider,
+            })
+        data[key] = records
+        _EQUITY_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temp_file = _EQUITY_CACHE_FILE.with_suffix(".tmp")
+        temp_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        temp_file.replace(_EQUITY_CACHE_FILE)
+    except Exception as exc:
+        logger.debug("NSE equity cache save failed", key=key, error=str(exc))
 
 
 class NSEDataProvider(MarketDataProvider):
@@ -252,6 +324,9 @@ class NSEDataProvider(MarketDataProvider):
             specs_to_try.append(("1y", 1440))
 
         candles: list[Candle] = []
+        now_utc = datetime.now(UTC)
+        tf_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 300)
+
         for cand_sym in candidate_syms:
             encoded_sym = urllib.parse.quote(cand_sym)
             for range_str, interval_min in specs_to_try:
@@ -274,6 +349,7 @@ class NSEDataProvider(MarketDataProvider):
                                 c_p = float(row[4])
                                 vol = float(row[5]) if len(row) > 5 and row[5] is not None else 0.0
                                 if o_p > 0 and c_p > 0:
+                                    is_closed = now_utc.timestamp() >= (ts.timestamp() + tf_seconds)
                                     batch.append(
                                         Candle(
                                             symbol=clean_sym,
@@ -284,10 +360,15 @@ class NSEDataProvider(MarketDataProvider):
                                             low=min(o_p, l_p, c_p),
                                             close=c_p,
                                             volume=max(0.0, vol),
+                                            is_closed=is_closed,
+                                            source_provider="GROWW_NSE",
+                                            source_interval=timeframe,
+                                            retrieved_at=now_utc,
                                         )
                                     )
                         if len(batch) >= 20:
                             self.touch_event()
+                            _save_equity_cache(f"NSE:{clean_sym}:{timeframe}", batch)
                             return batch
                         elif len(batch) > len(candles):
                             candles = batch
@@ -296,6 +377,7 @@ class NSEDataProvider(MarketDataProvider):
 
         if candles:
             self.touch_event()
+            _save_equity_cache(f"NSE:{clean_sym}:{timeframe}", candles)
             return candles
         encoded_sym = urllib.parse.quote(clean_sym)
 
@@ -327,6 +409,7 @@ class NSEDataProvider(MarketDataProvider):
                         c_p = float(c_arr[i])
                         vol = float(v_arr[i]) if i < len(v_arr) and v_arr[i] is not None else 0.0
                         if o_p > 0 and c_p > 0:
+                            is_closed = now_utc.timestamp() >= (ts.timestamp() + tf_seconds)
                             candles.append(
                                 Candle(
                                     symbol=clean_sym,
@@ -337,13 +420,23 @@ class NSEDataProvider(MarketDataProvider):
                                     low=min(o_p, l_p, c_p),
                                     close=c_p,
                                     volume=max(0.0, vol),
+                                    is_closed=is_closed,
+                                    source_provider="MONEYCONTROL_NSE",
+                                    source_interval=timeframe,
+                                    retrieved_at=now_utc,
                                 )
                             )
                     if candles:
                         self.touch_event()
+                        _save_equity_cache(f"NSE:{clean_sym}:{timeframe}", candles)
                         return candles
         except Exception as exc:
             logger.warning("NSE historical candle retrieval failed across all providers", symbol=clean_sym, error=str(exc))
+
+        cached = _load_equity_cache(f"NSE:{clean_sym}:{timeframe}")
+        if cached:
+            self.touch_event()
+            return cached[-limit:]
 
         return candles
 

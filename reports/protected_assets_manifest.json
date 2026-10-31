@@ -1,0 +1,98 @@
+{
+  "generated_at": "2026-10-20T14:18:44.796920+00:00",
+  "system_scope": "NSE, BSE, QUOTEX_RESEARCH_ONLY",
+  "real_money_trading": "PERMANENTLY_DISABLED",
+  "paper_worker_state": "STOPPED",
+  "assets": [
+    {
+      "path": "models_store/lgbm_candidate_v20261020_044046/v20261020_044046/model.joblib",
+      "classification": "IMMUTABLE_FROZEN_MODEL",
+      "description": "Frozen LightGBM model weights candidate",
+      "exists": true,
+      "size_bytes": 39636,
+      "sha256": "d955be760504e9f690b6d3c21d9707fb7ad56a39c3ba5f03fe7aebb833ac45c2",
+      "line_count": null
+    },
+    {
+      "path": "models_store/lgbm_candidate_v20261020_044046/v20261020_044046/metadata.json",
+      "classification": "IMMUTABLE_FROZEN_MODEL_METADATA",
+      "description": "Frozen LightGBM model configuration and metadata",
+      "exists": true,
+      "size_bytes": 1168,
+      "sha256": "ebf940958de5f617e359cddaf802570ce0bf2e05a91f41a7350b0ec952f4307e",
+      "line_count": 50
+    },
+    {
+      "path": "data/ledger/prediction_outcomes.jsonl.bak",
+      "classification": "IMMUTABLE_OUTCOME_BACKUP",
+      "description": "Cryptographically sealed historical outcome ledger backup (407 records)",
+      "exists": true,
+      "size_bytes": 549821,
+      "sha256": "d6ec09c9b2838df563f06e06eb21161acb725534b46d365c913ce48430bb827f",
+      "line_count": 407
+    },
+    {
+      "path": "policies/MODEL_EVALUATION_AND_PROMOTION_POLICY.md",
+      "classification": "IMMUTABLE_GOVERNANCE_POLICY",
+      "description": "Governance policy document version POL-GOV-2026-001",
+      "exists": true,
+      "size_bytes": 11526,
+      "sha256": "126680bf93ea477a76908b28c2147de78b722fd20559534cb25bf1b36919bd31",
+      "line_count": 170
+    },
+    {
+      "path": "data/ledger/prediction_outcomes.jsonl",
+      "classification": "DYNAMIC_APPEND_ONLY_LEDGER",
+      "description": "Primary production prediction outcomes ledger",
+      "exists": true,
+      "size_bytes": 2649080,
+      "sha256": "8e97f265efcc296ceac4f5a4c79f8fdb79e21d3d9116a1f36c08d20a028540ac",
+      "line_count": 866
+    },
+    {
+      "path": "data/ledger/pending_predictions.jsonl",
+      "classification": "DYNAMIC_ACTIVE_LEDGER",
+      "description": "Active pending predictions queue",
+      "exists": true,
+      "size_bytes": 7212929,
+      "sha256": "219fc8c19add24d7b32a6136ec69e4a1c349107511543ea74171688e96526de1",
+      "line_count": 1725
+    },
+    {
+      "path": "data/learning/learning_audit_ledger.jsonl",
+      "classification": "DYNAMIC_LEARNING_LEDGER",
+      "description": "Continuous learning audit ledger",
+      "exists": true,
+      "size_bytes": 868255,
+      "sha256": "d1085ba6d0f9a9ee94d9cbc39239f147ba57f02ee73970c39a0497eeb1aae56f",
+      "line_count": 82
+    },
+    {
+      "path": "data/learning/learning_controller_state.json",
+      "classification": "DYNAMIC_STATE_STORE",
+      "description": "Learning controller operational state",
+      "exists": true,
+      "size_bytes": 171708,
+      "sha256": "89b9db61ab6f5a35dda319545c8c81f0ad47c3cb7109e7b454a9f00fd9884767",
+      "line_count": 5168
+    },
+    {
+      "path": "data/paper_trading/paper_predictions.jsonl",
+      "classification": "ISOLATED_PAPER_PREDICTIONS",
+      "description": "Dedicated isolated paper trading predictions store",
+      "exists": true,
+      "size_bytes": 4960,
+      "sha256": "8002fd584378df5e5bbc4aca5295122147de1a8957c583dfc76fba5caf2873ee",
+      "line_count": 5
+    },
+    {
+      "path": "data/paper_trading/paper_outcomes.jsonl",
+      "classification": "ISOLATED_PAPER_OUTCOMES",
+      "description": "Dedicated isolated paper trading outcomes store",
+      "exists": false,
+      "size_bytes": 0,
+      "sha256": null,
+      "line_count": null
+    }
+  ]
+}

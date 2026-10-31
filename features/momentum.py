@@ -4,6 +4,8 @@ Calculates Relative Strength Index (RSI), MACD, Rate of Change (ROC),
 Stochastic Oscillator (%K, %D), and Williams %R.
 """
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -41,16 +43,17 @@ def compute_stochastic(
 
 def compute_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate momentum indicators: RSI, MACD, ROC, Stochastic, and Williams %R."""
-    feats = pd.DataFrame(index=df.index)
+    data: dict[str, Any] = {}
     c = df["close"]
     h = df["high"]
     l = df["low"]
 
     # 1. RSI across multiple lookbacks
     for p in [7, 14, 21]:
-        feats[f"rsi_{p}"] = compute_rsi(c, period=p)
-        feats[f"rsi_{p}_overbought"] = np.where(feats[f"rsi_{p}"] >= 70.0, 1, 0)
-        feats[f"rsi_{p}_oversold"] = np.where(feats[f"rsi_{p}"] <= 30.0, 1, 0)
+        rsi_s = compute_rsi(c, period=p)
+        data[f"rsi_{p}"] = rsi_s
+        data[f"rsi_{p}_overbought"] = np.where(rsi_s >= 70.0, 1, 0)
+        data[f"rsi_{p}_oversold"] = np.where(rsi_s <= 30.0, 1, 0)
 
     # 2. MACD (12, 26, 9)
     fast_ema = c.ewm(span=12, min_periods=1, adjust=False).mean()
@@ -59,24 +62,24 @@ def compute_momentum_features(df: pd.DataFrame) -> pd.DataFrame:
     macd_signal = macd_line.ewm(span=9, min_periods=1, adjust=False).mean()
     macd_hist = macd_line - macd_signal
 
-    feats["macd_line"] = macd_line
-    feats["macd_signal"] = macd_signal
-    feats["macd_hist"] = macd_hist
-    feats["macd_hist_slope_3"] = macd_hist - macd_hist.shift(3).fillna(0.0)
+    data["macd_line"] = macd_line
+    data["macd_signal"] = macd_signal
+    data["macd_hist"] = macd_hist
+    data["macd_hist_slope_3"] = macd_hist - macd_hist.shift(3).fillna(0.0)
 
     # 3. Rate of Change (ROC)
     for p in [5, 10, 20]:
-        feats[f"roc_{p}"] = ((c - c.shift(p)) / c.shift(p).replace(0.0, 1e-8)) * 100.0
-        feats[f"roc_{p}"] = feats[f"roc_{p}"].fillna(0.0)
+        shift_c = c.shift(p)
+        data[f"roc_{p}"] = (((c - shift_c) / shift_c.replace(0.0, 1e-8)) * 100.0).fillna(0.0)
 
     # 4. Stochastic Oscillator (14, 3)
     k_14, d_14 = compute_stochastic(h, l, c, k_period=14, d_period=3)
-    feats["stoch_k_14"] = k_14
-    feats["stoch_d_14"] = d_14
+    data["stoch_k_14"] = k_14
+    data["stoch_d_14"] = d_14
 
     # 5. Williams %R (14)
     highest_h14 = h.rolling(window=14, min_periods=1).max()
     lowest_l14 = l.rolling(window=14, min_periods=1).min()
-    feats["williams_r_14"] = -100.0 * (highest_h14 - c) / (highest_h14 - lowest_l14).replace(0.0, 1e-8)
+    data["williams_r_14"] = -100.0 * (highest_h14 - c) / (highest_h14 - lowest_l14).replace(0.0, 1e-8)
 
-    return feats
+    return pd.DataFrame(data, index=df.index)

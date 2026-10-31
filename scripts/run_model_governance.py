@@ -18,7 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description="Audit and govern candidate trading models")
     parser.add_argument("--candidate-id", type=str, default="lgbm_alpha_v2", help="Candidate Model ID")
     parser.add_argument("--min-sharpe", type=float, default=1.0, help="Minimum OOS Sharpe required")
-    parser.add_argument("--min-win-rate", type=float, default=50.0, help="Minimum OOS Win Rate (%)")
+    parser.add_argument("--min-win-rate", type=float, default=50.0, help="Minimum OOS Win Rate (%%)")
     args = parser.parse_args()
 
     print("\n========================================================")

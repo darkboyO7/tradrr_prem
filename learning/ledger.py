@@ -11,7 +11,8 @@ a continuous background worker that automatically resolves predictions at horizo
 
 import asyncio
 import json
-from datetime import UTC, datetime
+import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import threading
 from typing import Any
@@ -26,7 +27,25 @@ from signals.forecast import ProbabilisticForecast
 
 logger = get_logger(__name__)
 
-LEDGER_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "ledger" / "prediction_outcomes.jsonl"
+PROD_LEDGER_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "ledger" / "prediction_outcomes.jsonl"
+PROD_PENDING_LEDGER_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "ledger" / "pending_predictions.jsonl"
+LEDGER_FILE_PATH = PROD_LEDGER_FILE_PATH
+PENDING_LEDGER_FILE_PATH = PROD_PENDING_LEDGER_FILE_PATH
+
+
+def _assert_not_writing_to_production_in_test(target_file: Path) -> None:
+    """Safety guardrail preventing automated tests from modifying production ledger files."""
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("ALLOW_PRODUCTION_FILE_MUTATION_IN_TEST"):
+        try:
+            resolved_target = target_file.resolve()
+            if resolved_target in (PROD_LEDGER_FILE_PATH.resolve(), PROD_PENDING_LEDGER_FILE_PATH.resolve()):
+                raise PermissionError(
+                    f"TEST ISOLATION VIOLATION: Refusing to write to production ledger file '{target_file}' during test execution. "
+                    "Tests must use isolated temporary files or fixtures."
+                )
+        except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
 
 
 def get_market_friction_rate(market: str | None) -> float:
@@ -77,6 +96,7 @@ class RecordedPrediction(BaseModel):
     source_data_timestamp: str | None = None
     outcome_definition: str = "triple_barrier_or_expiration"
     data_quality_status: str = "PASSED"
+    status: str = "PENDING"
     evaluation_window_start: datetime | None = None
     evaluation_window_end: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
@@ -90,15 +110,27 @@ class PredictionLedgerService:
 
     _instance: "PredictionLedgerService | None" = None
 
-    def __init__(self, session_factory: Any | None = None, load_persisted: bool = False) -> None:
+    def __init__(
+        self,
+        session_factory: Any | None = None,
+        load_persisted: bool = False,
+        ledger_file: Path | str | None = None,
+        pending_ledger_file: Path | str | None = None,
+    ) -> None:
         self._session_factory = session_factory or get_db_session
         self.state_service = MarketStateService.get_instance()
-        self._ledger_lock = threading.Lock()
+        self._ledger_lock = threading.RLock()
+        self.ledger_file = Path(ledger_file or LEDGER_FILE_PATH)
+        self.pending_ledger_file = Path(pending_ledger_file or PENDING_LEDGER_FILE_PATH)
         self._active_predictions: dict[str, RecordedPrediction] = {}
         self._resolved_outcomes: list[dict[str, Any]] = []
         self._resolved_prediction_ids: set[str] = set()
         self._resolver_task: asyncio.Task[None] | None = None
+        self._resolver_thread: threading.Thread | None = None
+        self._stop_resolver_event = threading.Event()
         self._is_running: bool = False
+        self._resolver_lock: Any | None = None
+        self._is_resolver_owner: bool = False
 
         # Cumulative metrics
         self.total_recorded: int = 0
@@ -118,11 +150,12 @@ class PredictionLedgerService:
 
     def _load_persisted_outcomes(self) -> None:
         """Load previously resolved real outcomes from JSONL ledger."""
-        if not LEDGER_FILE_PATH.exists():
+        if not self.ledger_file.exists():
+            self._load_persisted_pending()
             return
         with self._ledger_lock:
             try:
-                lines = LEDGER_FILE_PATH.read_text(encoding="utf-8", errors="ignore").splitlines()
+                lines = self.ledger_file.read_text(encoding="utf-8", errors="ignore").splitlines()
                 for line in lines:
                     line = line.strip()
                     if not line:
@@ -133,6 +166,14 @@ class PredictionLedgerService:
                         if pid in self._resolved_prediction_ids:
                             continue
                         self._resolved_prediction_ids.add(pid)
+                    # Normalize in-memory status representation for backwards compatibility
+                    if "status" not in rec:
+                        if rec.get("outcome") in ("WIN", "LOSS", "NEUTRAL"):
+                            rec["status"] = "RESOLVED"
+                        elif rec.get("outcome") == "NO_DATA":
+                            rec["status"] = "EXPIRED_WITHOUT_DATA"
+                        else:
+                            rec["status"] = "RESOLVED" if rec.get("resolved_at") else "UNKNOWN"
                     self._resolved_outcomes.append(rec)
                     self.total_recorded += 1
                     self.total_resolved += 1
@@ -148,6 +189,52 @@ class PredictionLedgerService:
                     self._resolved_outcomes = self._resolved_outcomes[-500:]
             except Exception as exc:
                 logger.warning("Failed loading persisted ledger outcomes", error=str(exc))
+
+        self._load_persisted_pending()
+
+    def _load_persisted_pending(self) -> None:
+        """Load in-flight active predictions from pending JSONL storage upon restart."""
+        if not self.pending_ledger_file.exists():
+            return
+        with self._ledger_lock:
+            try:
+                lines = self.pending_ledger_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    data = json.loads(line)
+                    pid = data.get("prediction_id")
+                    if not pid or pid in self._resolved_prediction_ids or pid in self._active_predictions:
+                        continue
+                    rec = RecordedPrediction(**data)
+                    self._active_predictions[pid] = rec
+            except Exception as exc:
+                logger.warning("Failed loading persisted pending predictions", error=str(exc))
+
+    def _persist_pending_prediction(self, rec: RecordedPrediction) -> None:
+        """Append an in-flight prediction to pending ledger storage."""
+        _assert_not_writing_to_production_in_test(self.pending_ledger_file)
+        try:
+            self.pending_ledger_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.pending_ledger_file.open("a", encoding="utf-8") as fh:
+                fh.write(rec.model_dump_json() + "\n")
+        except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
+            logger.debug("Could not append pending prediction to ledger file", error=str(exc))
+
+    def _sync_pending_file(self) -> None:
+        """Atomically synchronize active in-flight predictions to pending storage."""
+        _assert_not_writing_to_production_in_test(self.pending_ledger_file)
+        try:
+            self.pending_ledger_file.parent.mkdir(parents=True, exist_ok=True)
+            lines = [rec.model_dump_json() + "\n" for rec in self._active_predictions.values()]
+            self.pending_ledger_file.write_text("".join(lines), encoding="utf-8")
+        except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
+            logger.debug("Could not sync pending predictions to file", error=str(exc))
 
     def evaluate_walk_forward_on_real_candles(
         self,
@@ -211,7 +298,11 @@ class PredictionLedgerService:
                     market=state.market.value,
                     features_used={"atr_14": state.atr_14, "bars_evaluated": len(hist_slice)},
                     historical_context_used={
-                        "regime": fc.evidence.get("regime", "NORMAL"),
+                        "regime": (
+                            fc.diagnostics.get("regime", "NORMAL")
+                            if hasattr(fc, "diagnostics") and isinstance(fc.diagnostics, dict)
+                            else (getattr(fc, "evidence", {}).get("regime", "NORMAL") if getattr(fc, "evidence", None) else "NORMAL")
+                        ),
                         "bar_timestamp": hist_slice[-1].get("timestamp"),
                     },
                 )
@@ -235,6 +326,13 @@ class PredictionLedgerService:
             if not cls._instance.last_self_dev_report:
                 cls._instance.run_self_development_cycle("NSE:TCS")
         return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """Reset singleton (primarily for test isolation and application shutdown)."""
+        if cls._instance is not None:
+            cls._instance.stop_background_resolver()
+            cls._instance = None
 
     def record_forecast(
         self,
@@ -276,19 +374,22 @@ class PredictionLedgerService:
             prob_down=forecast.prob_down,
             confidence=forecast.confidence,
             expected_return_pct=forecast.expected_return_pct,
-            decision_thresholds=decision_thresholds or {"min_confidence": 0.52},
-            features_used=features_used or {"atr_14": ev.get("atr_14", 0.0)},
-            historical_context_used=historical_context_used or {"regime": ev.get("regime", "NORMAL")},
+            decision_thresholds=decision_thresholds if decision_thresholds is not None else {"min_confidence": 0.52},
+            features_used=features_used if features_used is not None else {"atr_14": ev.get("atr_14", 0.0)},
+            historical_context_used=historical_context_used if historical_context_used is not None else {"regime": ev.get("regime", "NORMAL")},
             source_data_timestamp=source_data_timestamp or ev.get("source_timestamp"),
             outcome_definition=outcome_definition,
             data_quality_status=data_quality_status,
+            status="PENDING",
             evaluation_window_start=now_utc,
             evaluation_window_end=forecast.target_time,
             highest_seen=entry,
             lowest_seen=entry,
         )
-        self._active_predictions[pred_id] = rec
-        self.total_recorded += 1
+        with self._ledger_lock:
+            self._active_predictions[pred_id] = rec
+            self.total_recorded += 1
+            self._persist_pending_prediction(rec)
 
         logger.info(
             "Recorded probabilistic forecast to ledger",
@@ -299,62 +400,83 @@ class PredictionLedgerService:
         )
         return pred_id
 
-    def start_background_resolver(self) -> None:
-        """Start the background task resolving predictions at expiration."""
+    def start_background_resolver(self, interval_seconds: float = 1.0, require_lock: bool = True) -> bool:
+        """Start the background task resolving predictions at expiration.
+
+        Supports both threaded execution (desktop application) and asyncio tasks.
+        Guarantees single-owner lifecycle via ProcessFileLock on .resolver.lock.
+        """
         if not self._is_running:
+            if require_lock:
+                from core.system_lock import ProcessFileLock
+
+                lock_path = self.ledger_file.parent / ".resolver.lock"
+                self._resolver_lock = ProcessFileLock(lock_path)
+                if not self._resolver_lock.acquire():
+                    logger.info("Prediction outcome resolver already active in another process. Operating in passive consumer mode.")
+                    self._is_resolver_owner = False
+                    return False
+                self._is_resolver_owner = True
+            else:
+                self._is_resolver_owner = True
+
             self._is_running = True
-            self._resolver_task = asyncio.create_task(self._resolver_loop())
-            logger.info("Autonomous prediction outcome resolver started")
+            self._stop_resolver_event.clear()
+
+            # 1. Threaded worker for desktop environment
+            self._resolver_thread = threading.Thread(
+                target=self._resolver_thread_worker,
+                args=(interval_seconds,),
+                daemon=True,
+                name="PredictionOutcomeResolver",
+            )
+            self._resolver_thread.start()
+
+            # 2. Asyncio task if a running loop exists
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    self._resolver_task = loop.create_task(self._resolver_loop())
+            except (RuntimeError, AttributeError):
+                pass
+
+            logger.info("Autonomous prediction outcome resolver started (Primary Owner)", interval_s=interval_seconds)
+            return True
+        return True
 
     def stop_background_resolver(self) -> None:
-        """Stop the background outcome resolver."""
+        """Stop the background outcome resolver cleanly."""
         self._is_running = False
+        self._stop_resolver_event.set()
         if self._resolver_task and not self._resolver_task.done():
             self._resolver_task.cancel()
+        if self._resolver_thread and self._resolver_thread.is_alive():
+            self._resolver_thread.join(timeout=2.0)
+        if self._resolver_lock is not None:
+            self._resolver_lock.release()
+            self._resolver_lock = None
+        self._is_resolver_owner = False
+        logger.info("Autonomous prediction outcome resolver stopped")
+
+    def _resolver_thread_worker(self, interval_seconds: float) -> None:
+        """Threaded background resolver loop executing periodically."""
+        while self._is_running and not self._stop_resolver_event.is_set():
+            try:
+                self.resolve_pending_forecasts()
+            except Exception as exc:
+                logger.error("Error in threaded outcome resolver loop", error=str(exc))
+            self._stop_resolver_event.wait(timeout=max(0.2, interval_seconds))
 
     async def _resolver_loop(self) -> None:
+        """Asyncio background resolver loop."""
         while self._is_running:
             try:
                 await asyncio.sleep(1.0)
-                now = datetime.now(UTC)
-                resolved_ids = []
-
-                for pred_id, rec in list(self._active_predictions.items()):
-                    if rec.resolved:
-                        continue
-
-                    state = self.state_service.get_state(rec.canonical_symbol)
-                    cur_price = state.last_price if state else rec.entry_price
-
-                    if cur_price > rec.highest_seen:
-                        rec.highest_seen = cur_price
-                    if cur_price < rec.lowest_seen:
-                        rec.lowest_seen = cur_price
-
-                    is_expired = now >= rec.target_time
-                    target_hit = (
-                        cur_price >= rec.target_price
-                        if rec.action == SignalAction.BUY
-                        else (cur_price <= rec.target_price if rec.action == SignalAction.SELL else False)
-                    )
-                    stop_hit = (
-                        cur_price <= rec.stop_price
-                        if rec.action == SignalAction.BUY
-                        else (cur_price >= rec.stop_price if rec.action == SignalAction.SELL else False)
-                    )
-
-                    if is_expired or target_hit or stop_hit:
-                        rec.resolved = True
-                        resolved_ids.append(pred_id)
-                        self._resolve_outcome(rec, cur_price, target_hit, stop_hit)
-
-                for pid in resolved_ids:
-                    self._active_predictions.pop(pid, None)
-
+                self.resolve_pending_forecasts()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("Error in outcome resolver loop", error=str(exc))
+                logger.error("Error in asyncio outcome resolver loop", error=str(exc))
 
     def resolve_prediction_now(
         self,
@@ -362,30 +484,36 @@ class PredictionLedgerService:
         exit_price: float | None = None,
     ) -> dict[str, Any] | None:
         """Resolve an active prediction immediately against actual or supplied market price."""
-        rec = self._active_predictions.get(prediction_id)
-        if not rec:
-            return None
+        with self._ledger_lock:
+            rec = self._active_predictions.get(prediction_id)
+            if not rec:
+                return None
 
-        if exit_price is None:
-            st = self.state_service.ensure_instrument_state(rec.canonical_symbol)
-            exit_price = st.last_price if st else rec.entry_price
+            if exit_price is None:
+                st = self.state_service.ensure_instrument_state(rec.canonical_symbol)
+                exit_price = float(st.last_price) if st and getattr(st, "last_price", 0.0) > 0 else None
 
-        rec.highest_seen = max(rec.highest_seen, exit_price)
-        rec.lowest_seen = min(rec.lowest_seen, exit_price)
-        target_hit = (
-            exit_price >= rec.target_price
-            if rec.action == SignalAction.BUY
-            else (exit_price <= rec.target_price if rec.action == SignalAction.SELL else False)
-        )
-        stop_hit = (
-            exit_price <= rec.stop_price
-            if rec.action == SignalAction.BUY
-            else (exit_price >= rec.stop_price if rec.action == SignalAction.SELL else False)
-        )
-        rec.resolved = True
-        outcome = self._resolve_outcome(rec, exit_price, target_hit, stop_hit)
-        self._active_predictions.pop(prediction_id, None)
-        return outcome
+            if exit_price is None or exit_price <= 0:
+                logger.warning("Cannot resolve prediction now: no valid exit price", pred_id=prediction_id)
+                return None
+
+            rec.highest_seen = max(rec.highest_seen, exit_price)
+            rec.lowest_seen = min(rec.lowest_seen, exit_price)
+            target_hit = (
+                exit_price >= rec.target_price
+                if rec.action == SignalAction.BUY
+                else (exit_price <= rec.target_price if rec.action == SignalAction.SELL else False)
+            )
+            stop_hit = (
+                exit_price <= rec.stop_price
+                if rec.action == SignalAction.BUY
+                else (exit_price >= rec.stop_price if rec.action == SignalAction.SELL else False)
+            )
+            rec.resolved = True
+            outcome = self._resolve_outcome(rec, exit_price, target_hit, stop_hit)
+            self._active_predictions.pop(prediction_id, None)
+            self._sync_pending_file()
+            return outcome
 
     def resolve_pending_forecasts(
         self,
@@ -397,45 +525,136 @@ class PredictionLedgerService:
         now = current_time or datetime.now(UTC)
         resolved_results: list[dict[str, Any]] = []
         pids_to_resolve: list[tuple[str, float, bool, bool]] = []
+        pids_expired_no_data: list[str] = []
 
-        for pred_id, rec in list(self._active_predictions.items()):
-            if rec.resolved:
-                continue
-            if symbol_or_canonical and rec.canonical_symbol != symbol_or_canonical and rec.symbol != symbol_or_canonical:
-                continue
+        with self._ledger_lock:
+            for pred_id, rec in list(self._active_predictions.items()):
+                if rec.resolved:
+                    continue
+                if symbol_or_canonical and rec.canonical_symbol != symbol_or_canonical and rec.symbol != symbol_or_canonical:
+                    continue
 
-            if current_price is not None and (symbol_or_canonical is None or rec.canonical_symbol == symbol_or_canonical):
-                p = float(current_price)
-            else:
-                st = self.state_service.get_state(rec.canonical_symbol)
-                p = float(st.last_price) if st and st.last_price > 0 else float(rec.entry_price)
+                if current_price is not None and (symbol_or_canonical is None or rec.canonical_symbol == symbol_or_canonical):
+                    p = float(current_price)
+                else:
+                    st = self.state_service.get_state(rec.canonical_symbol)
+                    p = float(st.last_price) if st and getattr(st, "last_price", 0.0) > 0 else 0.0
 
-            if p > rec.highest_seen:
-                rec.highest_seen = p
-            if p < rec.lowest_seen:
-                rec.lowest_seen = p
+                is_expired = now >= rec.target_time
 
-            is_expired = now >= rec.target_time
-            target_hit = (
-                p >= rec.target_price if rec.action == SignalAction.BUY
-                else (p <= rec.target_price if rec.action == SignalAction.SELL else False)
-            )
-            stop_hit = (
-                p <= rec.stop_price if rec.action == SignalAction.BUY
-                else (p >= rec.stop_price if rec.action == SignalAction.SELL else False)
-            )
+                if p <= 0.0:
+                    # Market data is missing / unavailable: do NOT fabricate exit = entry!
+                    if is_expired:
+                        max_wait = timedelta(hours=24)
+                        if now >= rec.target_time + max_wait:
+                            pids_expired_no_data.append(pred_id)
+                        else:
+                            logger.debug(
+                                "Pending prediction reached horizon but awaiting valid market price",
+                                pred_id=pred_id,
+                                symbol=rec.symbol,
+                            )
+                    continue
 
-            if is_expired or target_hit or stop_hit:
-                rec.resolved = True
-                pids_to_resolve.append((pred_id, p, target_hit, stop_hit))
+                if p > rec.highest_seen:
+                    rec.highest_seen = p
+                if p < rec.lowest_seen:
+                    rec.lowest_seen = p
 
-        for pid, exit_p, thit, shit in pids_to_resolve:
-            rec = self._active_predictions.pop(pid, None)
-            if rec:
-                outcome = self._resolve_outcome(rec, exit_p, thit, shit)
-                resolved_results.append(outcome)
+                target_hit = (
+                    p >= rec.target_price if rec.action == SignalAction.BUY
+                    else (p <= rec.target_price if rec.action == SignalAction.SELL else False)
+                )
+                stop_hit = (
+                    p <= rec.stop_price if rec.action == SignalAction.BUY
+                    else (p >= rec.stop_price if rec.action == SignalAction.SELL else False)
+                )
+
+                if is_expired or target_hit or stop_hit:
+                    rec.resolved = True
+                    pids_to_resolve.append((pred_id, p, target_hit, stop_hit))
+
+            for pid in pids_expired_no_data:
+                rec = self._active_predictions.pop(pid, None)
+                if rec:
+                    rec.resolved = True
+                    no_data_rec = self._resolve_expired_no_data(rec)
+                    resolved_results.append(no_data_rec)
+
+            for pid, exit_p, thit, shit in pids_to_resolve:
+                rec = self._active_predictions.pop(pid, None)
+                if rec:
+                    outcome = self._resolve_outcome(rec, exit_p, thit, shit)
+                    resolved_results.append(outcome)
+
+            if pids_to_resolve or pids_expired_no_data:
+                self._sync_pending_file()
 
         return resolved_results
+
+    def _resolve_expired_no_data(self, rec: RecordedPrediction) -> dict[str, Any]:
+        """Record a prediction that expired past max horizon with no market data available."""
+        now_utc = datetime.now(UTC)
+        outcome_record = {
+            "prediction_id": rec.prediction_id,
+            "symbol": rec.symbol,
+            "canonical_symbol": rec.canonical_symbol,
+            "market": rec.market,
+            "model_id": rec.model_id,
+            "feature_pipeline_version": rec.feature_pipeline_version,
+            "forecast_horizon": rec.forecast_horizon,
+            "horizon_seconds": rec.horizon_seconds,
+            "action": rec.action.value,
+            "entry_price": rec.entry_price,
+            "exit_price": None,
+            "highest_seen": rec.highest_seen,
+            "lowest_seen": rec.lowest_seen,
+            "target_price": rec.target_price,
+            "stop_price": rec.stop_price,
+            "prob_up": rec.prob_up,
+            "prob_down": rec.prob_down,
+            "prob_neutral": 0.0,
+            "confidence": rec.confidence,
+            "status": "EXPIRED_WITHOUT_DATA",
+            "market_return_pct": None,
+            "market_target_direction": None,
+            "market_class_int": None,
+            "outcome": "NO_DATA",
+            "actual_return_pct": None,
+            "gross_trade_return_pct": None,
+            "net_trade_return_pct": None,
+            "market_friction_bps": round(get_market_friction_rate(rec.market) * 10000.0, 2),
+            "quotex_binary_pnl_pct": None,
+            "mfe_pct": None,
+            "mae_pct": None,
+            "brier_score": None,
+            "multiclass_brier_score": None,
+            "binary_brier_score": None,
+            "target_hit": False,
+            "stop_hit": False,
+            "decision_thresholds": rec.decision_thresholds,
+            "features_used": rec.features_used,
+            "historical_context_used": rec.historical_context_used,
+            "source_data_timestamp": rec.source_data_timestamp,
+            "outcome_definition": rec.outcome_definition,
+            "data_quality_status": "EXPIRED_NO_DATA",
+            "predicted_at": rec.created_at.isoformat(),
+            "resolved_at": now_utc.isoformat(),
+            "evaluation_window_start": rec.created_at.isoformat(),
+            "evaluation_window_end": now_utc.isoformat(),
+        }
+        self._resolved_prediction_ids.add(rec.prediction_id)
+        self._resolved_outcomes.append(outcome_record)
+        _assert_not_writing_to_production_in_test(self.ledger_file)
+        try:
+            self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.ledger_file.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(outcome_record) + "\n")
+        except Exception as exc:
+            if isinstance(exc, PermissionError):
+                raise
+            logger.debug("Could not append expired no-data outcome to ledger", error=str(exc))
+        return outcome_record
 
     def get_eligible_learning_samples(self) -> list[dict[str, Any]]:
         """Return all deduplicated, resolved outcome records containing features and verified outcomes."""
@@ -443,9 +662,22 @@ class PredictionLedgerService:
         seen = set()
         for r in self._resolved_outcomes:
             pid = str(r.get("prediction_id", ""))
-            if pid and pid not in seen and r.get("features_used"):
-                seen.add(pid)
-                eligible.append(r)
+            if not pid or pid in seen:
+                continue
+            status = r.get("status", "RESOLVED")
+            outcome = r.get("outcome")
+            exit_p = r.get("exit_price")
+            feats = r.get("features_used") or {}
+
+            if status != "RESOLVED" or outcome not in ("WIN", "LOSS", "NEUTRAL"):
+                continue
+            if exit_p is None or float(exit_p) <= 0:
+                continue
+            if len(feats) == 0:
+                continue
+
+            seen.add(pid)
+            eligible.append(r)
         return eligible
 
     def _resolve_outcome(
@@ -592,6 +824,7 @@ class PredictionLedgerService:
                 "market_target_direction": market_target_direction,
                 "market_class_int": market_class_int,
                 # Trade / Strategy Metrics
+                "status": "RESOLVED",
                 "outcome": outcome_val,
                 "actual_return_pct": net_trade_return_pct,
                 "gross_trade_return_pct": gross_trade_return_pct,
@@ -621,12 +854,17 @@ class PredictionLedgerService:
             if len(self._resolved_outcomes) > 500:
                 self._resolved_outcomes.pop(0)
 
+            _assert_not_writing_to_production_in_test(self.ledger_file)
             try:
-                LEDGER_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-                with LEDGER_FILE_PATH.open("a", encoding="utf-8") as fh:
+                self.ledger_file.parent.mkdir(parents=True, exist_ok=True)
+                with self.ledger_file.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(outcome_record) + "\n")
             except Exception as exc:
+                if isinstance(exc, PermissionError):
+                    raise
                 logger.debug("Could not append outcome to local ledger file", error=str(exc))
+
+            self._sync_pending_file()
 
             logger.info(
                 "Resolved prediction outcome",
@@ -916,7 +1154,18 @@ class PredictionLedgerService:
         return {
             "total_recorded": self.total_recorded,
             "active_in_flight": len(self._active_predictions),
+            "total_pending": len(self._active_predictions),
+            "pending_count": len(self._active_predictions),
             "total_resolved": self.total_resolved,
+            "resolved_count": self.total_resolved,
+            "status_breakdown": {
+                "RESOLVED": self.total_resolved,
+                "PENDING": len(self._active_predictions),
+                "WIN": self.total_correct,
+                "LOSS": sum(1 for r in self._resolved_outcomes if r.get("outcome") == "LOSS"),
+                "NEUTRAL": sum(1 for r in self._resolved_outcomes if r.get("outcome") == "NEUTRAL"),
+                "EXPIRED_WITHOUT_DATA": sum(1 for r in self._resolved_outcomes if r.get("status") == "EXPIRED_WITHOUT_DATA"),
+            },
             "total_correct": self.total_correct,
             "win_rate_pct": win_rate,
             "prediction_accuracy": accuracy_val,

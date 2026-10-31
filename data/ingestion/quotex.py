@@ -215,6 +215,9 @@ class QuotexMarketDataAdapter(MarketDataProvider):
             return []
 
         underlying = rec.underlying_instrument if rec else f"FX:{clean_sym.replace('_OTC', '')}"
+        now_utc = datetime.now(UTC)
+        tf_seconds = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 300)
+
         if underlying.startswith("FX:"):
             underlying_fx = underlying.split(":", 1)[1]
             fx_candles = self._fx_proxy.fetch_historical_candles_sync(
@@ -233,6 +236,10 @@ class QuotexMarketDataAdapter(MarketDataProvider):
                     low=c.low,
                     close=c.close,
                     volume=c.volume,
+                    is_closed=now_utc.timestamp() >= (c.timestamp.timestamp() + tf_seconds),
+                    source_provider="UNDERLYING_FX_INTERBANK_PROXY",
+                    source_interval=c.timeframe,
+                    retrieved_at=now_utc,
                 )
                 for c in fx_candles
             ]
@@ -254,6 +261,10 @@ class QuotexMarketDataAdapter(MarketDataProvider):
                         low=c.low,
                         close=c.close,
                         volume=c.volume,
+                        is_closed=now_utc.timestamp() >= (c.timestamp.timestamp() + tf_seconds),
+                        source_provider="COINBASE_KRAKEN_CRYPTO_PROXY",
+                        source_interval=c.timeframe,
+                        retrieved_at=now_utc,
                     )
                     for c in c_list
                 ]

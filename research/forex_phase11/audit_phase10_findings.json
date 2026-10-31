@@ -1,0 +1,90 @@
+[
+  {
+    "item": "A.1 EURUSD Cost & Hurdle Units",
+    "file": "research/forex_research_pipeline.py",
+    "line": "30-58",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "Spread in price units, commission fractional, friction=2.296 bps, hurdle=3.296 bps."
+  },
+  {
+    "item": "A.2 EURCHF Cost & Hurdle Units",
+    "file": "research/forex_research_pipeline.py",
+    "line": "56-58",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "EURCHF friction=3.260 bps, hurdle=4.260 bps."
+  },
+  {
+    "item": "A.3 Double Counting & Asymmetric Execution",
+    "file": "research/forex_research_pipeline.py",
+    "line": "370-435",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "Labeling sets classification threshold; evaluator computes PnL with ask/bid fills. Zero double-counting."
+  },
+  {
+    "item": "B.1 Weekend Gap Isolation",
+    "file": "research/forex_research_pipeline.py",
+    "line": "180-230",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "Weekend closures (>300s) use intra-bar return and group-isolated multi-bar shifts. Zero weekend jump leakage."
+  },
+  {
+    "item": "B.2 Missing Intraday Bar Treatment",
+    "file": "research/forex_research_pipeline.py",
+    "line": "180-205",
+    "status": "PASS",
+    "severity": "LOW",
+    "detail": "Missing bars (>300s) reset multi-bar shifts and use intra-bar return without interpolation. Functionally sound, but does not distinguish weekend closure from intraday gap."
+  },
+  {
+    "item": "B.3 Zero-Filling Neutrality",
+    "file": "research/forex_research_pipeline.py",
+    "line": "205-230",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "0.0 fills represent zero price change during session initialization, avoiding NaN propagation."
+  },
+  {
+    "item": "B.4 Feature Causality & Leakage",
+    "file": "research/forex_research_pipeline.py",
+    "line": "180-280",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "Modifying bars at t >= 30 produces 0.00e+00 difference in all 12 features for t < 30."
+  },
+  {
+    "item": "C.1 Next Open Execution Timing (t+1)",
+    "file": "research/forex_research_pipeline.py",
+    "line": "305-325",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "Prediction at bar t close executes at bar t+1 open; exit is at bar t+1+h open. Validated against hand calculation."
+  },
+  {
+    "item": "C.2 Terminal Horizon Exclusion",
+    "file": "research/forex_research_pipeline.py",
+    "line": "320-330",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "All bars with incomplete forward horizons strictly return NaN. Zero synthetic label fabrication."
+  },
+  {
+    "item": "D.1 Momentum Non-contiguous Alignment",
+    "file": "research/forex_research_pipeline.py",
+    "line": "425-465",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "Momentum baseline evaluates explicit fold indices without trailing-segment assumptions."
+  },
+  {
+    "item": "D.2 Feature Schema Versioning & Rejection",
+    "file": "research/forex_research_pipeline.py",
+    "line": "135-155",
+    "status": "PASS",
+    "severity": "NONE",
+    "detail": "FX-FEAT-v1.0.0 enforced. Datasets with mismatched schema versions are strictly rejected with ValueError."
+  }
+]

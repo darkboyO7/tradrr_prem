@@ -152,3 +152,112 @@ class StatisticalBaselineModel(BasePredictorModel):
             adx_trend_threshold=params.get("adx_trend_threshold", 25.0),
         )
         return model
+
+
+class MajorityClassBaselineModel(BasePredictorModel):
+    """Trivial benchmark predicting the empirical majority class observed during training."""
+
+    def __init__(
+        self,
+        model_id: str = "majority_baseline_v1",
+        version: str = "v1.0.0",
+        majority_class: int = 1,  # 0=SELL, 1=NEUTRAL/NO-TRADE, 2=BUY
+    ) -> None:
+        metadata = ModelMetadata(
+            model_id=model_id,
+            model_name="MajorityClassBaseline",
+            version=version,
+            model_type="MajorityClassBaselineModel",
+            feature_names=[],
+            target_name="target_direction",
+            parameters={"majority_class": majority_class},
+        )
+        super().__init__(metadata)
+        self.majority_class = majority_class
+        self.class_priors_: list[float] = [0.0, 1.0, 0.0]
+
+    def fit(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> "MajorityClassBaselineModel":
+        y_arr = np.asarray(y, dtype=int)
+        counts = [np.sum(y_arr == c) for c in (0, 1, 2)]
+        total = max(1, len(y_arr))
+        self.class_priors_ = [c / total for c in counts]
+        self.majority_class = int(np.argmax(counts))
+        self.metadata.parameters["majority_class"] = self.majority_class
+        self.metadata.parameters["class_priors"] = self.class_priors_
+        return self
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        n = len(X)
+        if n == 0:
+            return np.empty((0, 3))
+        return np.tile(self.class_priors_, (n, 1))
+
+    def predict(self, X: pd.DataFrame) -> list[ModelPrediction]:
+        probas = self.predict_proba(X)
+        preds = []
+        action_map = {0: SignalAction.SELL, 1: SignalAction.NO_TRADE, 2: SignalAction.BUY}
+        for row in probas:
+            p_sell, p_neutral, p_buy = float(row[0]), float(row[1]), float(row[2])
+            preds.append(
+                ModelPrediction(
+                    action=action_map.get(self.majority_class, SignalAction.NO_TRADE),
+                    probability=round(float(row[self.majority_class]), 4),
+                    expected_return=0.0,
+                    horizon_bars=5,
+                    raw_scores={"sell": round(p_sell, 4), "no_trade": round(p_neutral, 4), "buy": round(p_buy, 4)},
+                )
+            )
+        return preds
+
+    def get_feature_importance(self) -> dict[str, float]:
+        return {}
+
+
+class UniformRandomBaselineModel(BasePredictorModel):
+    """Uniform random benchmark predicting equal 1/3 probability for all 3 classes."""
+
+    def __init__(
+        self,
+        model_id: str = "uniform_baseline_v1",
+        version: str = "v1.0.0",
+        seed: int = 42,
+    ) -> None:
+        metadata = ModelMetadata(
+            model_id=model_id,
+            model_name="UniformRandomBaseline",
+            version=version,
+            model_type="UniformRandomBaselineModel",
+            feature_names=[],
+            target_name="target_direction",
+            parameters={"seed": seed},
+        )
+        super().__init__(metadata)
+        self.seed = seed
+
+    def fit(self, X: pd.DataFrame, y: pd.Series | np.ndarray) -> "UniformRandomBaselineModel":
+        return self
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        n = len(X)
+        if n == 0:
+            return np.empty((0, 3))
+        return np.full((n, 3), 1.0 / 3.0)
+
+    def predict(self, X: pd.DataFrame) -> list[ModelPrediction]:
+        probas = self.predict_proba(X)
+        preds = []
+        for row in probas:
+            preds.append(
+                ModelPrediction(
+                    action=SignalAction.NO_TRADE,
+                    probability=round(1.0 / 3.0, 4),
+                    expected_return=0.0,
+                    horizon_bars=5,
+                    raw_scores={"sell": round(row[0], 4), "no_trade": round(row[1], 4), "buy": round(row[2], 4)},
+                )
+            )
+        return preds
+
+    def get_feature_importance(self) -> dict[str, float]:
+        return {}
+
