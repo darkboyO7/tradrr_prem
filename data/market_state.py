@@ -178,10 +178,10 @@ class MarketStateService:
                 provider=trade.provider,
                 connection_state="CONNECTED",
                 last_price=trade.price,
-                bid_price=trade.price,
-                ask_price=trade.price,
-                spread=0.0,
-                spread_pct=0.0,
+                bid_price=None,
+                ask_price=None,
+                spread=None,
+                spread_pct=None,
                 last_tick_time=trade.timestamp,
                 data_age_seconds=max(0.0, (now - trade.timestamp).total_seconds()),
                 is_stale=max(0.0, (now - trade.timestamp).total_seconds()) > self.stale_threshold_seconds,
@@ -215,6 +215,11 @@ class MarketStateService:
             inst = UniverseService.resolve_arbitrary_stock(candle.symbol)
             canon = inst.canonical_symbol if inst else candle.symbol
 
+        now = datetime.now(UTC)
+        c_ts = candle.timestamp if candle.timestamp.tzinfo else candle.timestamp.replace(tzinfo=UTC)
+        age_sec = max(0.0, (now - c_ts).total_seconds())
+        is_stale_flag = age_sec > self.stale_threshold_seconds
+
         if canon not in self._states:
             market = inst.market if inst else MarketType.CRYPTO
             self._states[canon] = InstrumentMarketState(
@@ -222,19 +227,22 @@ class MarketStateService:
                 canonical_symbol=canon,
                 market=market,
                 last_price=candle.close,
-                bid_price=candle.close,
-                ask_price=candle.close,
-                spread=0.0,
-                spread_pct=0.0,
-                last_tick_time=candle.timestamp,
-                last_candle_time=candle.timestamp,
-                data_age_seconds=0.0,
-                is_stale=False,
+                bid_price=None,
+                ask_price=None,
+                spread=None,
+                spread_pct=None,
+                last_tick_time=c_ts,
+                last_candle_time=c_ts,
+                data_age_seconds=age_sec,
+                is_stale=is_stale_flag,
             )
 
         state = self._states[canon]
         state.last_price = candle.close
-        state.last_candle_time = candle.timestamp
+        state.last_candle_time = c_ts
+        if state.last_tick_time is None or state.last_tick_time <= c_ts:
+            state.data_age_seconds = age_sec
+            state.is_stale = is_stale_flag
         c_dict = {
             "timestamp": candle.timestamp.isoformat(),
             "open": candle.open,
@@ -278,13 +286,21 @@ class MarketStateService:
             chunk = bars[idx : idx + group_size]
             if not chunk:
                 continue
+            open_p = float(chunk[0]["open"])
+            close_p = float(chunk[-1]["close"])
+            high_p = max(float(c["high"]) for c in chunk)
+            low_p = min(float(c["low"]) for c in chunk)
+            # Enforce strict OHLC integrity
+            high_p = max(high_p, open_p, close_p)
+            low_p = min(low_p, open_p, close_p)
+            vol_p = max(0.0, round(sum(float(c.get("volume", 0.0)) for c in chunk), 2))
             agg.append({
                 "timestamp": chunk[-1]["timestamp"],
-                "open": float(chunk[0]["open"]),
-                "high": max(float(c["high"]) for c in chunk),
-                "low": min(float(c["low"]) for c in chunk),
-                "close": float(chunk[-1]["close"]),
-                "volume": round(sum(float(c.get("volume", 0.0)) for c in chunk), 2),
+                "open": open_p,
+                "high": high_p,
+                "low": low_p,
+                "close": close_p,
+                "volume": vol_p,
             })
         return agg
 

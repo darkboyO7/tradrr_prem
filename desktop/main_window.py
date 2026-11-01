@@ -1446,17 +1446,29 @@ class TradingIntelligenceDesktopWindow(QMainWindow):
             self.lbl_session_badge.setStyleSheet(
                 "background-color: #7F1D1D; color: #FCA5A5; padding: 4px 12px; border-radius: 12px; border: none;"
             )
+        elif "STALE" in badge:
+            self.lbl_session_badge.setStyleSheet(
+                "background-color: #78350F; color: #FCD34D; padding: 4px 12px; border-radius: 12px; border: none;"
+            )
         elif "PRE-MARKET" in badge:
             self.lbl_session_badge.setStyleSheet(
                 "background-color: #1E3A8A; color: #93C5FD; padding: 4px 12px; border-radius: 12px; border: none;"
             )
         elif "CLOSED" in badge:
             self.lbl_session_badge.setStyleSheet(
-                "background-color: #78350F; color: #FCD34D; padding: 4px 12px; border-radius: 12px; border: none;"
+                "background-color: #334155; color: #94A3B8; padding: 4px 12px; border-radius: 12px; border: none;"
+            )
+        elif "REFERENCE" in badge or "CACHED" in badge:
+            self.lbl_session_badge.setStyleSheet(
+                "background-color: #1E293B; color: #38BDF8; padding: 4px 12px; border-radius: 12px; border: none;"
+            )
+        elif "LIVE" in badge:
+            self.lbl_session_badge.setStyleSheet(
+                "background-color: #064E3B; color: #34D399; padding: 4px 12px; border-radius: 12px; border: none;"
             )
         else:
             self.lbl_session_badge.setStyleSheet(
-                "background-color: #064E3B; color: #34D399; padding: 4px 12px; border-radius: 12px; border: none;"
+                "background-color: #334155; color: #CBD5E1; padding: 4px 12px; border-radius: 12px; border: none;"
             )
 
         # Quote / Evaluation Timestamp

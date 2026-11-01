@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: Literal["development", "staging", "production", "test"] = "development"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     LOG_JSON: bool = False
-    APP_HOST: str = "0.0.0.0"
+    APP_HOST: str = "127.0.0.1"  # Default to loopback for security isolation
     APP_PORT: int = 8000
 
     # TimescaleDB / PostgreSQL

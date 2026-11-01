@@ -139,6 +139,13 @@ class DesktopServiceController:
     def get_recent_logs(self) -> list[str]:
         return list(self._recent_logs)
 
+    def startup(
+        self,
+        progress_callback: Callable[[int, str, StartupCheckResult], None] | None = None,
+    ) -> StartupCheckResult:
+        """Alias for run_startup_sequence."""
+        return self.run_startup_sequence(progress_callback=progress_callback)
+
     def run_startup_sequence(
         self,
         progress_callback: Callable[[int, str, StartupCheckResult], None] | None = None,
@@ -437,11 +444,31 @@ class DesktopServiceController:
             except Exception as exc:
                 self.log_event(f"Ledger record forecast warning for {canon}: {exc}")
 
-        # Determine session status (Section 16: Offline / Market-Closed Mode)
+        # Determine data provenance and session status (Section 16: Offline / Market-Closed Mode)
         mkt_name = inst_obj.market.value if inst_obj else "NSE"
         timing_info = self.get_market_session_status(mkt_name)
         is_open = timing_info["is_open"]
-        session_badge = timing_info["badge"]
+        clock_badge = timing_info["badge"]
+
+        # Derive provenance-truthful session badge
+        is_stale = bool(st_obj.is_stale) if st_obj else False
+        provider = getattr(st_obj, "provider", None) if st_obj else None
+        conn_state = getattr(st_obj, "connection_state", "") if st_obj else ""
+
+        if inst_obj and inst_obj.market == MarketType.QUOTEX:
+            session_badge = "QUOTEX DATA UNAVAILABLE"
+        elif not st_obj or not st_obj.last_price or st_obj.last_price <= 0:
+            session_badge = "DATA UNAVAILABLE"
+        elif is_stale:
+            session_badge = "DATA STALE"
+        elif not is_open:
+            session_badge = clock_badge
+        elif conn_state == "CONNECTED" and provider and ("live" in provider.lower() or "direct" in provider.lower() or "websocket" in provider.lower()):
+            session_badge = "LIVE VERIFIED"
+        elif provider and ("cache" in provider.lower() or "fallback" in provider.lower() or "reference" in provider.lower()):
+            session_badge = "REFERENCE ONLY"
+        else:
+            session_badge = clock_badge
         last_price = float(st_obj.last_price) if (st_obj and st_obj.last_price > 0) else float(decision.entry_price or 0.0)
         currency = inst_obj.quote_currency if inst_obj else "INR"
 
@@ -497,6 +524,7 @@ class DesktopServiceController:
             "quotex_info": quotex_info,
             "is_market_open": is_open,
             "session_badge": session_badge,
+            "session_timing": timing_info,
             "last_price": last_price,
             "price_display": self.format_price(last_price, currency, inst_obj.market.value if inst_obj else "NSE"),
             "signal": ui_signal,

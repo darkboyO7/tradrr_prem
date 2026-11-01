@@ -4,6 +4,7 @@ Enforces firm-wide exposure caps, drawdown circuit breakers, position limits,
 and mathematical sizing before any order can be routed to execution.
 """
 
+import math
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
@@ -96,6 +97,31 @@ class RiskEngine:
                 take_profit=signal.take_profit,
                 risk_reward_ratio=signal.risk_reward_ratio,
                 rejection_reason="Signal action is NO_TRADE",
+            )
+
+        # 1b. Check price and stop-loss finite validity
+        if (
+            math.isnan(price) or math.isinf(price) or price <= 0.0 or
+            math.isnan(signal.stop_loss) or math.isinf(signal.stop_loss) or signal.stop_loss <= 0.0
+        ):
+            return self._create_rejection(
+                signal,
+                requested_quantity or 0.0,
+                f"Invalid entry price ({price}) or stop loss ({signal.stop_loss}): must be positive, finite numbers",
+            )
+
+        # 1c. Risk Geometry Validation
+        if action == SignalAction.BUY and signal.stop_loss >= price:
+            return self._create_rejection(
+                signal,
+                requested_quantity or 0.0,
+                f"Invalid BUY risk geometry: stop loss ({signal.stop_loss}) must be strictly below entry price ({price})",
+            )
+        if action == SignalAction.SELL and signal.stop_loss <= price:
+            return self._create_rejection(
+                signal,
+                requested_quantity or 0.0,
+                f"Invalid SELL risk geometry: stop loss ({signal.stop_loss}) must be strictly above entry price ({price})",
             )
 
         # 2. Peak-to-Trough Drawdown Circuit Breaker

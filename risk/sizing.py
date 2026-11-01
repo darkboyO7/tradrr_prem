@@ -5,6 +5,9 @@ Implements Fixed Fractional, Volatility-Adjusted, and Fractional Kelly sizing al
 
 
 
+import math
+
+
 class PositionSizer:
     """Calculates safe, risk-managed order quantities."""
 
@@ -28,7 +31,15 @@ class PositionSizer:
         Returns:
             Approved asset quantity (e.g. BTC or ETH units).
         """
-        if equity <= 0 or entry_price <= 0:
+        if (
+            math.isnan(equity) or math.isinf(equity) or
+            math.isnan(entry_price) or math.isinf(entry_price) or
+            math.isnan(stop_loss) or math.isinf(stop_loss) or
+            math.isnan(risk_per_trade_pct) or math.isinf(risk_per_trade_pct) or
+            math.isnan(max_position_pct) or math.isinf(max_position_pct) or
+            equity <= 0 or entry_price <= 0 or stop_loss <= 0 or
+            risk_per_trade_pct <= 0 or max_position_pct <= 0
+        ):
             return 0.0
 
         risk_dollars = equity * risk_per_trade_pct
@@ -56,10 +67,18 @@ class PositionSizer:
         atr_multiplier: float = 1.5,
     ) -> float:
         """Calculate quantity scaling inversely with recent market ATR."""
-        if atr <= 0 or entry_price <= 0 or equity <= 0:
+        if (
+            math.isnan(atr) or math.isinf(atr) or
+            math.isnan(entry_price) or math.isinf(entry_price) or
+            math.isnan(equity) or math.isinf(equity) or
+            math.isnan(target_vol_dollars) or math.isinf(target_vol_dollars) or
+            atr <= 0 or entry_price <= 0 or equity <= 0 or target_vol_dollars <= 0
+        ):
             return 0.0
 
         dollar_risk_per_unit = atr * atr_multiplier
+        if dollar_risk_per_unit <= 0 or math.isnan(dollar_risk_per_unit) or math.isinf(dollar_risk_per_unit):
+            return 0.0
         quantity = target_vol_dollars / dollar_risk_per_unit
         return round(float(quantity), 6)
 
@@ -74,7 +93,12 @@ class PositionSizer:
         Kelly formula: f* = (p * b - q) / b
         where p = win rate, q = 1 - p, b = payoff ratio (win/loss).
         """
-        if payoff_ratio <= 0 or win_rate <= 0:
+        if (
+            math.isnan(win_rate) or math.isinf(win_rate) or
+            math.isnan(payoff_ratio) or math.isinf(payoff_ratio) or
+            math.isnan(fraction) or math.isinf(fraction) or
+            payoff_ratio <= 0 or win_rate <= 0 or win_rate >= 1.0 or fraction <= 0
+        ):
             return 0.0
 
         q = 1.0 - win_rate

@@ -4,6 +4,7 @@ Combines Technical Indicators, Pattern Recognition, ML Model Predictions, and Ma
 into a unified, explainable decision (BUY, SELL, NO-TRADE) with dynamic ATR-based risk parameters.
 """
 
+import math
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -485,8 +486,21 @@ class SignalFusionEngine:
         tp_dist = (atr_scale * 2.0) * atr
         price_decimals = 5 if current_price < 10.0 else 2
         score_margin = abs(score_buy - score_sell)
-        is_buy_conviction = score_buy >= threshold and (score_buy - score_sell) >= self.min_decision_margin
-        is_sell_conviction = score_sell >= threshold and (score_sell - score_buy) >= self.min_decision_margin
+        valid_price_atr = (
+            atr > 0.0
+            and current_price > 0.0
+            and not (math.isnan(atr) or math.isinf(atr) or math.isnan(current_price) or math.isinf(current_price))
+        )
+        is_buy_conviction = (
+            score_buy >= threshold
+            and (score_buy - score_sell) >= self.min_decision_margin
+            and valid_price_atr
+        )
+        is_sell_conviction = (
+            score_sell >= threshold
+            and (score_sell - score_buy) >= self.min_decision_margin
+            and valid_price_atr
+        )
 
         if is_buy_conviction:
             action = SignalAction.BUY
@@ -512,7 +526,7 @@ class SignalFusionEngine:
 
         else:
             action = SignalAction.NO_TRADE
-            confidence = max(score_buy, score_sell)
+            confidence = max(0.0, min(1.0, max(score_buy, score_sell)))
             # Provide reference risk envelope if ATR is positive and features were evaluated, else current_price
             if latest_features is not None and atr > 0:
                 if score_buy >= score_sell:
@@ -752,8 +766,9 @@ def run_live_intelligence_pipeline(
 
     if not state or len(candles) < 20:
         status_code = "DATA_UNAVAILABLE" if not state or len(candles) == 0 else "INSUFFICIENT_DATA"
-        if inst.market.value == "QUOTEX" and status_code == "DATA_UNAVAILABLE":
-            human_msg = "Quotex live data unavailable"
+        if inst.market.value == "QUOTEX":
+            status_code = "QUOTEX_DATA_UNAVAILABLE"
+            human_msg = "Quotex live data unavailable: Proprietary broker-synthetic OTC asset without public data feed"
         else:
             human_msg = "Live market data is currently unavailable or insufficient for a reliable prediction"
         price = state.last_price if state else (override_price or 0.0)
